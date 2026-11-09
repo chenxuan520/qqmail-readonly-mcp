@@ -772,8 +772,32 @@ function oauthProvider(env: MailEnv): OAuthProvider<MailEnv> {
 	return cachedProvider;
 }
 
+// ChatGPT identifies itself with a CIMD URL client_id. With CIMD disabled, that URL
+// resolves to a statically seeded public client record in OAUTH_KV (auth method "none").
+// ChatGPT still signs private_key_jwt client assertions at the token endpoint, so strip
+// the assertion parameters here — client authentication for this pinned public client is
+// covered by PKCE and the exact redirect-URI binding instead.
+const PINNED_CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json";
+
+async function stripPinnedClientAssertion(request: Request): Promise<Request> {
+	const url = new URL(request.url);
+	if (request.method !== "POST" || url.pathname !== "/oauth/token") return request;
+	if (!(request.headers.get("content-type") || "").includes("application/x-www-form-urlencoded"))
+		return request;
+	const params = new URLSearchParams(await request.text());
+	if (params.get("client_id") !== PINNED_CHATGPT_CLIENT_ID)
+		return new Request(request, { body: params });
+	params.delete("client_assertion");
+	params.delete("client_assertion_type");
+	return new Request(request, { body: params });
+}
+
 export default {
 	async fetch(request: Request, env: MailEnv, ctx: ExecutionContext): Promise<Response> {
-		return oauthProvider(env).fetch(request as unknown as Request, env, ctx);
+		return oauthProvider(env).fetch(
+			(await stripPinnedClientAssertion(request)) as unknown as Request,
+			env,
+			ctx,
+		);
 	},
 } satisfies ExportedHandler<MailEnv>;

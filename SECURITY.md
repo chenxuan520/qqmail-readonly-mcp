@@ -54,6 +54,16 @@ Four secrets exist, each with a single job:
 - The consent page shows the MCP client's name (escaped), its redirect host, and the
   scopes, per the MCP authorization spec; it binds the approval to your browser
   (`__Host-` cookie + one-time handle) and cannot be framed.
+- ChatGPT connects with its CIMD URL client_id (`https://chatgpt.com/oauth/client.json`).
+  CIMD fetching is disabled (Worker egress to chatgpt.com was unreliable); instead its
+  client record is statically seeded in `OAUTH_KV` as a public client
+  (`tokenEndpointAuthMethod: "none"`, redirect URI exactly
+  `https://chatgpt.com/connector_platform_oauth_redirect`). Because ChatGPT still sends
+  `private_key_jwt` client assertions to `/oauth/token`, the Worker strips
+  `client_assertion`/`client_assertion_type` from token requests for this one pinned
+  client_id; client authentication for it is then the authorization code + PKCE + exact
+  redirect-URI binding (standard public-client OAuth), which cannot move tokens to any
+  other client or host. No other client_id gets this treatment.
 - Password comparison is constant-time; no password or token is ever written to logs.
 
 ## Logging
