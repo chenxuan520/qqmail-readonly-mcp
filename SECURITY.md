@@ -68,9 +68,9 @@ Four secrets exist, each with a single job:
 Outbound connections are limited to:
 
 - `imap.qq.com` (or hosts listed in `ALLOWED_IMAP_HOSTS`) over TLS for IMAP (raw TCP
-  sockets), and
-- HTTPS `fetch` to public internet only (`global_fetch_strictly_public` compatibility
-  flag), used solely for OAuth Client ID Metadata Documents.
+  sockets). Outbound `fetch` is restricted to public internet
+  (`global_fetch_strictly_public` compatibility flag) and is not used by any runtime
+  path (CIMD is disabled so OAuth runs client-to-server only, via DCR).
 
 The account form only accepts IMAP hostnames on the `ALLOWED_IMAP_HOSTS` allowlist
 (default `imap.qq.com`), so mailbox configuration cannot be used to probe arbitrary

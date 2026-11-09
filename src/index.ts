@@ -766,7 +766,7 @@ function oauthProvider(env: MailEnv): OAuthProvider<MailEnv> {
 				authorization_servers: [origin],
 				resource_name: "QQ Mail read-only MCP",
 			},
-			clientIdMetadataDocumentEnabled: true,
+			clientIdMetadataDocumentEnabled: false,
 		});
 	}
 	return cachedProvider;
