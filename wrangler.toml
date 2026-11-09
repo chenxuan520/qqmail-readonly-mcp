@@ -1,7 +1,7 @@
 name = "qqmail-readonly-mcp"
 main = "src/index.ts"
 compatibility_date = "2026-06-14"
-compatibility_flags = ["nodejs_compat"]
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 
 [[migrations]]
 tag = "v1"
@@ -15,10 +15,13 @@ class_name = "MyMCP"
 binding = "EMAIL_KV"
 id = "replace-with-your-kv-namespace-id"
 
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "replace-with-your-oauth-kv-namespace-id"
+
 [vars]
-TEAM_DOMAIN = "https://your-team.cloudflareaccess.com"
-POLICY_AUD = "replace-with-your-access-application-aud-tag"
 ALLOWED_IMAP_HOSTS = "imap.qq.com"
+PUBLIC_ORIGIN = "https://your-mcp-host.example.com"
 
 [observability]
 enabled = true

@@ -1,14 +1,15 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { McpAgent } from "agents/mcp";
-import { createRemoteJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
-import { accessRejection } from "./access";
 import app from "./app";
 import { AccountStore } from "./mail/account-store";
 import { MailService } from "./mail/mail-service";
 import type { MailEnv } from "./mail/types";
 import { observeTool } from "./observability";
+import { handleAuthorize } from "./oauth-flow";
+import { handleLogin, hasValidSession } from "./owner-auth";
 
 const accountSelector = {
 	accountId: z
@@ -731,43 +732,48 @@ function text(value: unknown, structuredContent?: Record<string, unknown>) {
 	};
 }
 
-interface AccessIdentity {
-	email: string;
-	sub: string;
-}
-
-let cachedTeamDomain: string | undefined;
-let cachedJwks: ReturnType<typeof createRemoteJWKSet> | undefined;
-
-async function verifyAccessJwt(token: string, env: MailEnv): Promise<AccessIdentity> {
-	const teamDomain = env.TEAM_DOMAIN.replace(/\/$/, "");
-	if (!teamDomain.startsWith("https://") || !env.POLICY_AUD)
-		throw new Error("Cloudflare Access is not configured");
-	if (!cachedJwks || cachedTeamDomain !== teamDomain) {
-		cachedTeamDomain = teamDomain;
-		cachedJwks = createRemoteJWKSet(new URL(`${teamDomain}/cdn-cgi/access/certs`));
-	}
-	const { payload } = await jwtVerify(token, cachedJwks, {
-		issuer: teamDomain,
-		audience: env.POLICY_AUD,
-	});
-	if (typeof payload.email !== "string" || typeof payload.sub !== "string")
-		throw new Error("Cloudflare Access token is missing identity claims");
-	return { email: payload.email, sub: payload.sub };
-}
-
 const mcpHandler = MyMCP.serve("/mcp");
+
+const defaultHandler = {
+	async fetch(request: Request, env: MailEnv, ctx: ExecutionContext): Promise<Response> {
+		const { pathname, origin } = new URL(request.url);
+		if (pathname === "/authorize") return handleAuthorize(request, env);
+		if (pathname === "/login") return handleLogin(request, env);
+		if (await hasValidSession(request, env)) return app.fetch(request, env, ctx);
+		if (request.method === "GET") return Response.redirect(`${origin}/login`, 302);
+		return new Response("Unauthorized", { status: 401 });
+	},
+};
+
+let cachedOrigin: string | undefined;
+let cachedProvider: OAuthProvider<MailEnv> | undefined;
+
+function oauthProvider(env: MailEnv): OAuthProvider<MailEnv> {
+	const origin = (env.PUBLIC_ORIGIN || "http://localhost:8787").replace(/\/$/, "");
+	if (!cachedProvider || cachedOrigin !== origin) {
+		cachedOrigin = origin;
+		cachedProvider = new OAuthProvider<MailEnv>({
+			apiRoute: "/mcp",
+			apiHandler: mcpHandler,
+			defaultHandler,
+			authorizeEndpoint: "/authorize",
+			tokenEndpoint: "/oauth/token",
+			clientRegistrationEndpoint: "/oauth/register",
+			scopesSupported: ["mcp:read", "offline_access"],
+			requiredScopes: ["mcp:read"],
+			resourceMetadata: {
+				resource: `${origin}/mcp`,
+				authorization_servers: [origin],
+				resource_name: "QQ Mail read-only MCP",
+			},
+			clientIdMetadataDocumentEnabled: true,
+		});
+	}
+	return cachedProvider;
+}
 
 export default {
 	async fetch(request: Request, env: MailEnv, ctx: ExecutionContext): Promise<Response> {
-		const rejection = await accessRejection(request, env, (token) =>
-			verifyAccessJwt(token, env),
-		);
-		if (rejection) return rejection;
-
-		const pathname = new URL(request.url).pathname;
-		return pathname === "/mcp" || pathname.startsWith("/mcp/")
-			? mcpHandler.fetch(request, env, ctx)
-			: app.fetch(request, env, ctx);
+		return oauthProvider(env).fetch(request as unknown as Request, env, ctx);
 	},
 } satisfies ExportedHandler<MailEnv>;

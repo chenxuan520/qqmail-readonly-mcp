@@ -10,7 +10,9 @@ descriptions, output schemas, and annotations as part of the product interface â
 wording changes affect whether AI clients pick the right tool.
 
 Most MCP tool definitions live in `src/index.ts`. Mail behavior lives under `src/mail/`.
-The Access-protected account management UI lives in `src/app.ts`.
+The owner-password account management UI lives in `src/app.ts`; owner login/session and
+rate limiting in `src/owner-auth.ts`; the OAuth 2.1 consent flow in `src/oauth-flow.ts`
+(authorization server itself is `@cloudflare/workers-oauth-provider`).
 
 ## The read-only invariant (do not break)
 
@@ -21,10 +23,14 @@ This server must never modify a mailbox:
   paths. Do not add any of these back, and do not accept features that need them.
 - Every registered MCP tool must keep `readOnlyHint: true`, `destructiveHint: false`.
 - Account configuration changes belong to the web UI in `src/app.ts`, never to MCP tools.
-- Logs must never contain credentials, tokens, tool arguments, or message content (see
-  `src/observability.ts`).
+- Logs must never contain credentials, passwords, tokens, tool arguments, or message
+  content (see `src/observability.ts`).
 - IMAP hosts are allowlisted via `ALLOWED_IMAP_HOSTS`; keep SSRF validation in
-  `src/app.ts` (`validHost` + allowlist).
+  `src/app.ts` (`validHost` + allowlist) and the `global_fetch_strictly_public`
+  compatibility flag.
+- Do not weaken the auth boundary: `/mcp` requires OAuth bearer tokens for the
+  configured resource; UI/consent require the owner password; no bearer of convenience
+  (static API keys, header tricks, disabling PKCE/DCR) may be added.
 
 ## MCP Tool Design
 

@@ -1,74 +1,79 @@
 # Connecting ChatGPT (and Dots)
 
-Goal: install `qqmail-readonly-mcp` as a ChatGPT custom MCP plugin over OAuth, so Dots
-can periodically check and summarize mail from your QQ mailbox.
+Goal: install `qqmail-readonly-mcp` as a ChatGPT custom MCP app over OAuth, so Dots can
+periodically check and summarize mail from your QQ mailbox.
 
-Prerequisite: the Worker is deployed and Cloudflare Access + Managed OAuth is enforced
-([DEPLOYMENT.md](DEPLOYMENT.md) steps 1–7 are done, and your QQ Mail account is added in
-the management UI).
+Prerequisite: the Worker is deployed and reachable
+([DEPLOYMENT.md](DEPLOYMENT.md) steps 1–6 are done, owner password works,
+QQ Mail account added in the management UI).
 
 ## Expected connection parameters
 
-| Field          | Value                                                     |
-| -------------- | --------------------------------------------------------- |
-| Plugin name    | `QQ Mail`                                                 |
-| Connection     | Server URL (public HTTPS endpoint)                        |
-| MCP server URL | `https://qqemail.011203.xyz/mcp` |
-| Authentication | **OAuth**                                                 |
+| Field           | Value                              |
+| --------------- | ---------------------------------- |
+| App/Plugin name | `QQ Mail`                          |
+| Connection      | Server URL (public HTTPS endpoint) |
+| MCP server URL  | `https://qqemail.011203.xyz/mcp`   |
+| Authentication  | **OAuth**                          |
 
 ## Steps
 
-1. In ChatGPT, open **Settings → Apps** (older UI: **Settings → Security and login** →
-   enable **Developer mode**, or **Settings → Connectors → Advanced → Developer mode**) —
-   the exact location moves between ChatGPT versions; any paid plan works.
-2. Choose **Create MCP app** / **Add custom MCP server** (older UI: Plugins → add).
+1. In ChatGPT, open **Settings → Apps** (older UI: **Settings → Connectors → Advanced →
+   Developer mode**; the exact location moves between ChatGPT versions).
+2. Choose **Create MCP app** / **Add custom MCP server**.
 3. Enter the name `QQ Mail` and the MCP server URL above, select **OAuth** as
    authentication, accept the risk acknowledgement if shown.
-4. Select **Scan Tools**. ChatGPT now runs OAuth against Cloudflare Access:
-    - it discovers the OAuth server from the Worker URL (RFC 9728 → RFC 8414 metadata
-      served by Cloudflare Access),
-    - registers itself dynamically (no client ID/secret to paste),
-    - opens the Cloudflare Access sign-in: complete it with your allowed identity,
-    - approves the grant and returns to ChatGPT.
+4. Select **Scan Tools**. ChatGPT now runs a standards OAuth 2.1 flow against your
+   Worker:
+    - discovers the authorization server (`/mcp` 401 → `WWW-Authenticate` →
+      `/.well-known/oauth-protected-resource/mcp` → `/.well-known/oauth-authorization-server`),
+    - registers itself dynamically (`POST /oauth/register`),
+    - opens the **Authorize** page of your Worker in a browser,
+    - you enter the **owner password** and click **Allow** (this is the only interactive
+      step — it proves you are the mailbox owner),
+    - ChatGPT exchanges the authorization code + PKCE verifier at `/oauth/token` and
+      stores the tokens.
 5. Confirm the discovered tool list shows the 11 read-only `email_*` tools, then
-   **Create** the plugin.
-6. In a new chat, enable the plugin (and for Dots/scheduled tasks, select it as a tool).
+   **Create** the app.
+6. In a new chat (or in Dots/scheduled tasks), enable the app.
 
 ## If OAuth fails — locate the layer, don't disable auth
 
-Work through these in order with `curl` from any machine:
+Work through these in order with `curl`:
 
 1. **Protected resource metadata**
-   `curl -i https://<worker-host>/mcp` — expect `401` with a `WWW-Authenticate` header and
-   `curl -s https://<worker-host>/.well-known/oauth-protected-resource` — expect JSON with
-   `authorization_servers`. If the worker instead returns `Unauthorized: missing Cloudflare
-   Access assertion` with no OAuth metadata, Managed OAuth is not enabled for the
-   application (or the request hit the Worker without Access in front).
+   `curl -i https://qqemail.011203.xyz/mcp -X POST` — expect `401` with
+   `WWW-Authenticate: Bearer ... resource_metadata="https://qqemail.011203.xyz/.well-known/oauth-protected-resource/mcp"`.
+   `curl -s https://qqemail.011203.xyz/.well-known/oauth-protected-resource/mcp` must
+   return JSON with `authorization_servers`. If not, `PUBLIC_ORIGIN` doesn't match the
+   hostname you are calling — fix it in `wrangler.production.toml` and redeploy.
 2. **Authorization server metadata**
-   Fetch `/.well-known/oauth-authorization-server` — expect `authorization_endpoint`,
-   `token_endpoint`, `registration_endpoint`, and `code_challenge_methods_supported`
-   containing `S256`. Missing S256 or missing metadata = Managed OAuth misconfiguration.
+   `curl -s https://qqemail.011203.xyz/.well-known/oauth-authorization-server` — expect
+   `authorization_endpoint`, `token_endpoint`, `registration_endpoint`, and
+   `code_challenge_methods_supported: ["S256"]`.
 3. **Dynamic client registration**
-   `POST` a minimal registration to the advertised `registration_endpoint` — expect `201`.
-   Failure here is an Access-side problem; re-check Managed OAuth is on for the right
-   application hostname.
-4. **Authorization** — if the browser flow shows an Access error page, the failing email
-   is not allowed by the policy. Fix the Access policy, not the Worker.
-5. **Token exchange / JWT verification** — if ChatGPT got a token but tool calls return
-   403, the Worker's own JWT check is failing: verify `POLICY_AUD` equals the application
-   AUD tag and `TEAM_DOMAIN` is exactly the team domain with `https://` and without a
-   trailing slash, then redeploy.
-6. **MCP initialize / tools list** — if OAuth succeeded but "configuration validation
-   failed" appears, test the endpoint with MCP Inspector; confirm the session reaches
-   `initialize` and `tools/list` with a valid Access JWT.
-7. **ChatGPT-side limits** — workspace policy can block custom MCP apps; check with the
-   workspace admin.
+   `curl -s -X POST https://qqemail.011203.xyz/oauth/register -H 'content-type: application/json' -d '{"redirect_uris":["https://example.com/cb"],"token_endpoint_auth_method":"none"}'`
+   — expect a JSON body with `client_id` (HTTP 200/201). Failure here points at the
+   `OAUTH_KV` binding.
+4. **Authorize page** — open
+   `https://qqemail.011203.xyz/authorize?response_type=code&client_id=<cid>&redirect_uri=<cb>&code_challenge=<s256>&code_challenge_method=S256&scope=mcp:read`
+   in a browser. It must render the consent page. Wrong owner password = 401 (restart
+   the flow in the client). Too many wrong attempts = 429 (wait ten minutes).
+5. **Token exchange** — if ChatGPT got a code but shows an exchange error, reproduce the
+   flow manually with curl (see DEPLOYMENT.md verification) and read the JSON
+   `error_description` from `/oauth/token`.
+6. **MCP with the token** —
+   `curl -X POST https://qqemail.011203.xyz/mcp -H "authorization: Bearer <token>" ...`
+   must reach `initialize` and `tools/list`. A 401 here with a freshly issued token
+   means the token didn't reach the Worker (proxy stripping the Authorization header) or
+   was issued for a different `resource`.
 
 ## Token lifetime
 
-Cloudflare Access session/app duration controls how long ChatGPT's grant lasts. When it
-expires, ChatGPT re-runs the OAuth flow; if it only shows an error, remove and re-add the
-plugin. Nothing in the Worker stores ChatGPT tokens.
+Access tokens last 1 hour; ChatGPT refreshes them with the refresh token (rotated on
+every use). If refresh fails (e.g. grant revoked), ChatGPT prompts you to re-authorize —
+one password entry, one Allow click. Nothing is stored in ChatGPT that can read your
+mailbox after you revoke the grant.
 
 ## What Dots can do with it
 

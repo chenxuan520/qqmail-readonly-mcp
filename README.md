@@ -44,20 +44,27 @@ summaries per call.
 - **QQ Mail IMAP over TLS** (`imap.qq.com:993`) via Cloudflare outbound TCP sockets,
   logged in with the mailbox address and its QQ Mail IMAP authorization code.
 - **Workers KV** stores account configuration AES-256-GCM encrypted
-  (`CREDENTIAL_ENCRYPTION_KEY` as a Worker secret).
-- **Cloudflare Access with Managed OAuth** fronting both `/mcp` and the web UI; the Worker
-  additionally verifies every Access JWT signature, issuer, and audience itself.
-- The account management web UI (Worker root `/`) is the only way to add, edit, or remove
-  mailbox credentials. The QQ authorization code never passes through an MCP client or
-  language model.
+  (`CREDENTIAL_ENCRYPTION_KEY` as a Worker secret), in its own `EMAIL_KV` namespace.
+- **Self-hosted OAuth 2.1** via `@cloudflare/workers-oauth-provider` (its own `OAUTH_KV`
+  namespace): RFC 8414 authorization-server metadata, RFC 9728 protected-resource
+  metadata pointing at `/.well-known/oauth-protected-resource/mcp`, RFC 7591 dynamic
+  client registration, authorization-code + PKCE (S256) with refresh-token rotation.
+  This is what ChatGPT's custom-MCP "OAuth" option talks to — no third-party accounts
+  and no Cloudflare Zero Trust needed.
+- **One owner password** (`OWNER_PASSWORD` Worker secret) is the only identity proof:
+  it is required on the OAuth consent page (`/authorize`) and on the account
+  management UI (`/login`). Failed attempts are rate-limited per IP.
+- The account management web UI (Worker root `/`) is the only way to add, edit, or
+  remove mailbox credentials. The QQ authorization code never passes through an MCP
+  client or language model.
 - The IMAP host is restricted to an allowlist (`ALLOWED_IMAP_HOSTS`, default
-  `imap.qq.com`) so the account form cannot be turned into an SSRF probe.
+  `imap.qq.com`) so the account form cannot be turned into an SSRF probe; the
+  `global_fetch_strictly_public` compatibility flag restricts outbound `fetch`.
 
 ## Documentation
 
-- [DEPLOYMENT.md](DEPLOYMENT.md) — Cloudflare setup: KV, secrets, deploy, Access +
-  Managed OAuth.
-- [CHATGPT.md](CHATGPT.md) — Connect ChatGPT (Developer mode) and use from Dots.
+- [DEPLOYMENT.md](DEPLOYMENT.md) — Cloudflare setup: KV namespaces, secrets, deploy.
+- [CHATGPT.md](CHATGPT.md) — Connect ChatGPT (custom MCP app) and use from Dots.
 - [SECURITY.md](SECURITY.md) — Security model, boundaries, and revocation.
 
 ## Local development
@@ -65,12 +72,15 @@ summaries per call.
 ```bash
 cp .dev.vars.example .dev.vars
 # fill CREDENTIAL_ENCRYPTION_KEY with: openssl rand -base64 32
+# pick any OWNER_PASSWORD for local testing (also update PUBLIC_ORIGIN to
+# http://localhost:8787 if you want discovery URLs to match the dev origin)
 npm install
 npm run dev
 ```
 
-MCP endpoint: `http://localhost:8787/mcp`. `ACCESS_LOCAL_DEV=true` bypasses Access
-verification **only** for `localhost`/`127.0.0.1`/`::1`. Never set it in production.
+MCP endpoint: `http://localhost:8787/mcp`. The management UI at `/` asks for the
+`OWNER_PASSWORD`; OAuth discovery, registration, authorize, and token endpoints work
+identically to production.
 
 ## Verification
 

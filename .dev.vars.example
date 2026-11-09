@@ -1,2 +1,2 @@
 CREDENTIAL_ENCRYPTION_KEY="replace-with-output-of-openssl-rand-base64-32"
-ACCESS_LOCAL_DEV="true"
+OWNER_PASSWORD="replace-with-your-owner-password"

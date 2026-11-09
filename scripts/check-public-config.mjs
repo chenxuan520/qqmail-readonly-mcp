@@ -14,18 +14,13 @@ assert.match(
 );
 assert.match(
 	wrangler,
-	/TEAM_DOMAIN = "https:\/\/your-team\.cloudflareaccess\.com"/,
-	"wrangler.toml must keep the sanitized Access domain",
+	/id = "replace-with-your-oauth-kv-namespace-id"/,
+	"wrangler.toml must keep the sanitized OAuth KV placeholder",
 );
 assert.doesNotMatch(
 	workerTypes,
-	/TEAM_DOMAIN:\s*"/,
-	"generated Worker types must not contain a literal Access domain",
-);
-assert.doesNotMatch(
-	workerTypes,
-	/POLICY_AUD:\s*"/,
-	"generated Worker types must not contain a literal Access audience",
+	/PUBLIC_ORIGIN:\s*"https:\/\/(?!your-mcp-host)/,
+	"generated Worker types must not contain a real public origin",
 );
 assert.match(
 	gitignore,

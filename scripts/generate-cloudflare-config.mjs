@@ -8,16 +8,21 @@ export function buildCloudflareConfig(environment = process.env) {
 		throw new Error("EMAIL_KV_NAMESPACE_ID must be configured as a Cloudflare build secret");
 	if (!/^[a-f0-9]{32}$/i.test(kvNamespaceId))
 		throw new Error("EMAIL_KV_NAMESPACE_ID must be a 32-character hexadecimal namespace ID");
+	const oauthKvNamespaceId = environment.OAUTH_KV_NAMESPACE_ID?.trim();
+	if (!oauthKvNamespaceId)
+		throw new Error("OAUTH_KV_NAMESPACE_ID must be configured as a Cloudflare build secret");
+	if (!/^[a-f0-9]{32}$/i.test(oauthKvNamespaceId))
+		throw new Error("OAUTH_KV_NAMESPACE_ID must be a 32-character hexadecimal namespace ID");
 
 	return {
 		$schema: "node_modules/wrangler/config-schema.json",
 		name: "qqmail-readonly-mcp",
 		main: "src/index.ts",
 		compatibility_date: "2026-06-14",
-		compatibility_flags: ["nodejs_compat"],
+		compatibility_flags: ["nodejs_compat", "global_fetch_strictly_public"],
 		keep_vars: true,
 		secrets: {
-			required: ["CREDENTIAL_ENCRYPTION_KEY"],
+			required: ["CREDENTIAL_ENCRYPTION_KEY", "OWNER_PASSWORD"],
 		},
 		migrations: [
 			{
@@ -37,6 +42,10 @@ export function buildCloudflareConfig(environment = process.env) {
 			{
 				binding: "EMAIL_KV",
 				id: kvNamespaceId,
+			},
+			{
+				binding: "OAUTH_KV",
+				id: oauthKvNamespaceId,
 			},
 		],
 		observability: {
