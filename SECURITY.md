@@ -92,9 +92,15 @@ internal hosts.
   single-owner deployment.
 - All configured accounts share one encrypted store; any MCP client you authorize can
   read every configured mailbox (read-only).
-- Free-text/body search with non-ASCII (e.g. Chinese) terms depends on the IMAP server
-  accepting UTF-8 in SEARCH criteria; QQ IMAP behaviour for these keys may vary by key
-  type — sender/subject/date filters are reliable.
+- Search filters verified working against QQ IMAP: from/to/subject, internal and sent
+  dates, seen/flagged/answered/draft/deleted, keyword, header Message-ID, and UTF-8
+  (e.g. Chinese) SUBJECT queries.
+- **QQ IMAP silently ignores the `LARGER` / `SMALLER` search keys** (returns all UIDs),
+  so `largerThan`/`smallerThan` do not filter against QQ Mail; `total` in those searches
+  is the whole folder. Server-side code passes them through unchanged — treat
+  `count`/`total` with care there.
+- Non-ASCII free-text BODY/TEXT search remains unverified against QQ; subject/from/date
+  filters are reliable.
 - A KV write race between two simultaneous account edits can drop one edit. For a
   single owner this is a non-issue.
 
