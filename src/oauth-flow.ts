@@ -27,15 +27,21 @@ export async function handleAuthorize(request: Request, env: MailEnv): Promise<R
 }
 
 async function showConsent(request: Request, helpers: OAuthHelpers): Promise<Response> {
-	try {
-		const parsed = await helpers.parseAuthRequest(request);
-		const details = await helpers.describeConsent(parsed);
-		const consent = await helpers.beginConsent(parsed);
-		consent.headers.set("content-type", "text/html; charset=utf-8");
-		return new Response(consentPage(details, consent.handle), { headers: consent.headers });
-	} catch (error) {
-		return authorizationErrorResponse(error);
+	// chatgpt.com (and future CIMD clients) are fetched server-to-server from the
+	// Worker; that egress is occasionally flaky, so retry once before failing.
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		try {
+			const parsed = await helpers.parseAuthRequest(request);
+			const details = await helpers.describeConsent(parsed);
+			const consent = await helpers.beginConsent(parsed);
+			consent.headers.set("content-type", "text/html; charset=utf-8");
+			return new Response(consentPage(details, consent.handle), { headers: consent.headers });
+		} catch (error) {
+			if (!(error instanceof CimdFetchError) || attempt === 1)
+				return authorizationErrorResponse(error);
+		}
 	}
+	return authorizationErrorResponse(new Error("unreachable"));
 }
 
 async function decideConsent(
@@ -126,11 +132,18 @@ function authorizationErrorResponse(error: unknown): Response {
 			status: 400,
 			headers: { "content-type": "text/plain; charset=utf-8" },
 		});
-	if (error instanceof CimdFetchError)
+	if (error instanceof CimdFetchError) {
+		console.error({
+			event: "cimd_fetch_failed",
+			reason: error.reason,
+			detail: error.detail,
+			metadataUrl: error.metadataUrl,
+		});
 		return new Response("This app could not be verified.", {
 			status: 400,
 			headers: { "content-type": "text/plain; charset=utf-8" },
 		});
+	}
 	throw error;
 }
 
