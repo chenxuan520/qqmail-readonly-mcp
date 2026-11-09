@@ -66,6 +66,8 @@ summaries per call.
 - [DEPLOYMENT.md](DEPLOYMENT.md) — Cloudflare setup: KV namespaces, secrets, deploy.
 - [CHATGPT.md](CHATGPT.md) — Connect ChatGPT (custom MCP app) and use from Dots.
 - [SECURITY.md](SECURITY.md) — Security model, boundaries, and revocation.
+- [CASE-STUDY-CHATGPT-CIMD.md](CASE-STUDY-CHATGPT-CIMD.md) — Debugging write-up: CIMD
+  fetch flakiness, a KV key `//`-collapse gotcha, and the pinned-client shim.
 
 ## Local development
 
