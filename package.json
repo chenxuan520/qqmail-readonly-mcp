@@ -1,24 +1,21 @@
 {
-	"name": "email-mcp-server",
+	"name": "qqmail-readonly-mcp",
 	"version": "1.0.0",
 	"private": true,
-	"description": "A Cloudflare Workers MCP server for Gmail, Outlook, iCloud, and custom IMAP/SMTP accounts.",
+	"description": "A read-only QQ Mail MCP server on Cloudflare Workers (IMAP only; no sending, moving, deleting, or flag changes).",
 	"keywords": [
 		"cloudflare-workers",
 		"email",
 		"imap",
 		"mcp",
 		"model-context-protocol",
-		"smtp"
+		"qqmail",
+		"read-only"
 	],
-	"homepage": "https://github.com/Xzese/email-mcp-server#readme",
-	"bugs": {
-		"url": "https://github.com/Xzese/email-mcp-server/issues"
-	},
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/Xzese/email-mcp-server.git"
+		"url": "git+https://github.com/Xzese/email-mcp-for-cloudflare-workers.git"
 	},
 	"type": "module",
 	"scripts": {

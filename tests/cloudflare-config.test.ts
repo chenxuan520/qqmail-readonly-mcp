@@ -15,10 +15,7 @@ test("Cloudflare build config preserves dashboard variables and existing secrets
 
 	assert.equal(config.keep_vars, true);
 	assert.equal("vars" in config, false);
-	assert.deepEqual(config.secrets.required, [
-		"CREDENTIAL_ENCRYPTION_KEY",
-		"OUTLOOK_CLIENT_SECRET",
-	]);
+	assert.deepEqual(config.secrets.required, ["CREDENTIAL_ENCRYPTION_KEY"]);
 	assert.deepEqual(config.kv_namespaces, [{ binding: "EMAIL_KV", id: namespaceId }]);
 	assert.deepEqual(config.durable_objects.bindings, [
 		{ name: "MCP_OBJECT", class_name: "MyMCP" },

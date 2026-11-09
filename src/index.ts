@@ -7,7 +7,6 @@ import { accessRejection } from "./access";
 import app from "./app";
 import { AccountStore } from "./mail/account-store";
 import { MailService } from "./mail/mail-service";
-import { senderSettings } from "./mail/sender";
 import type { MailEnv } from "./mail/types";
 import { observeTool } from "./observability";
 
@@ -30,68 +29,10 @@ const accountIdsSelector = {
 		),
 };
 
-const attachmentSchema = z.object({
-	filename: z.string().min(1).describe("Attachment filename to include on the draft."),
-	contentType: z.string().min(1).describe("Attachment MIME type, for example application/pdf."),
-	contentBase64: z
-		.string()
-		.min(1)
-		.describe("Raw attachment bytes encoded as base64; not for message text or HTML."),
-});
-
-const recipientSchema = z.union([z.string().email(), z.array(z.string().email()).min(1)]);
-const optionalRecipientSchema = z.union([z.string().email(), z.array(z.string().email())]);
-const replyToSchema = z
-	.string()
-	.email()
-	.describe("Optional Reply-To email address to include on the draft for recipient replies.");
-
-const senderInputs = {
-	aliases: z
-		.array(z.string().email())
-		.optional()
-		.describe(
-			"Additional email addresses already authorized to send through this provider account, such as iCloud or Outlook aliases. Replaces the entire local alias list when supplied; [] removes all aliases. Does not create provider aliases. Omit to preserve existing aliases on update.",
-		),
-	defaultFrom: z
-		.string()
-		.email()
-		.optional()
-		.describe(
-			"Default From address for new drafts and replies; must be the account login email or one of aliases. Omit to use the login email on add or preserve the current default on update. Set to the login email to reset it. Does not change the login username or the provider's default sender.",
-		),
-};
-
-const senderOutput = {
-	aliases: z
-		.array(z.string())
-		.describe("Configured additional sending addresses; excludes the login email."),
-	defaultFrom: z.string().describe("Effective default From address for new drafts and replies."),
-};
-
-const draftFromSchema = z
-	.string()
-	.email()
-	.optional()
-	.describe(
-		"Optional From address: use the account email or an alias returned by email_list_accounts. New drafts and replies default to defaultFrom; draft updates preserve the existing From when omitted. Configure aliases or change the default with email_update_account_sender first. This is distinct from replyTo.",
-	);
-
-const uidSchema = z.union([
-	z.number().int().positive(),
-	z.array(z.number().int().positive()).min(1).max(100),
-]);
-
 const serverConfigOutput = z.object({
 	host: z.string(),
 	port: z.number().int(),
 	secure: z.boolean(),
-});
-
-const capabilitiesOutput = z.object({
-	imap: z.boolean(),
-	smtp: z.boolean(),
-	canSend: z.boolean(),
 });
 
 const messageSummaryOutput = z.object({
@@ -140,33 +81,15 @@ const multiAccountSearchOutput = {
 	messages: z.array(multiAccountMessageSummaryOutput),
 };
 
-const draftLocationOutput = {
-	from: z.string().describe("From address saved in this draft and used when sending it."),
-	accountId: z.string(),
-	folder: z.string(),
-	uid: z.number().int(),
-	messageId: z.string(),
-};
-
-const localWrite = annotations(false, false, false, false);
-const localDelete = annotations(false, true, false, false);
 const remoteRead = annotations(true, false, true, true);
-const remoteUpdate = annotations(false, false, true, true);
-const remoteCreate = annotations(false, false, false, true);
-const remoteMove = annotations(false, true, false, true);
-const remoteDelete = annotations(false, true, true, true);
-const remoteSend = annotations(false, true, false, true);
 
 export class MyMCP extends McpAgent<MailEnv> {
-	server = new McpServer({ name: "email-mcp-server", version: "1.0.0" });
+	server = new McpServer({ name: "qqmail-readonly-mcp", version: "1.0.0" });
 
 	async init() {
 		const env = (this as unknown as { env: MailEnv }).env;
 		const store = new AccountStore(env.EMAIL_KV, env.CREDENTIAL_ENCRYPTION_KEY);
-		const mail = new MailService(store, {
-			clientId: env.OUTLOOK_CLIENT_ID,
-			clientSecret: env.OUTLOOK_CLIENT_SECRET,
-		});
+		const mail = new MailService(store);
 		const registerTools = (
 			names: string[],
 			config: any,
@@ -176,136 +99,10 @@ export class MyMCP extends McpAgent<MailEnv> {
 		};
 
 		this.server.registerTool(
-			"email_add_account",
-			{
-				description:
-					"Add, configure, or connect a Gmail, Outlook, iCloud, or custom IMAP email account. Stores encrypted credentials and returns the new account ID, login email, aliases, defaultFrom, and send capabilities. aliases must already be authorized at the provider; defaultFrom changes only this MCP server’s sender setting. IMAP is required; SMTP is optional. Do not use to search, read, move, send, or delete messages.",
-				inputSchema: {
-					name: z
-						.string()
-						.describe(
-							"Display name for this configured account, shown in list and search results.",
-						),
-					email: z
-						.string()
-						.email()
-						.describe(
-							"Login email address used for IMAP/SMTP authentication; use aliases and defaultFrom to send from another authorized address.",
-						),
-					...senderInputs,
-					imapHost: z.string().describe("IMAP host used to read folders and messages."),
-					imapPort: z.number().int().default(993).describe("IMAP port; defaults to 993."),
-					imapSecure: z
-						.boolean()
-						.default(true)
-						.describe("Whether IMAP uses TLS; defaults to true."),
-					smtpHost: z
-						.string()
-						.optional()
-						.describe(
-							"Optional SMTP host used to send drafts; omit for a read-only account.",
-						),
-					smtpPort: z
-						.number()
-						.int()
-						.optional()
-						.describe("Optional SMTP port; defaults to 465 when smtpHost is provided."),
-					smtpSecure: z
-						.boolean()
-						.default(true)
-						.describe("Whether SMTP uses TLS; defaults to true."),
-					password: z
-						.string()
-						.optional()
-						.describe("Password or app password for IMAP/SMTP authentication."),
-					accessToken: z
-						.string()
-						.optional()
-						.describe("OAuth2 access token for IMAP/SMTP authentication."),
-					refreshToken: z
-						.string()
-						.optional()
-						.describe("Optional OAuth2 refresh token used to renew accessToken."),
-					oauthClientId: z
-						.string()
-						.optional()
-						.describe(
-							"Optional OAuth2 client ID used when refreshing OAuth2 credentials.",
-						),
-					oauthTenant: z
-						.string()
-						.default("consumers")
-						.describe("OAuth2 tenant identifier; defaults to consumers."),
-					tokenExpiresAt: z
-						.number()
-						.optional()
-						.describe(
-							"Optional epoch timestamp in milliseconds when accessToken expires.",
-						),
-				},
-				outputSchema: {
-					id: z.string(),
-					name: z.string(),
-					email: z.string(),
-					...senderOutput,
-					capabilities: capabilitiesOutput,
-				},
-				annotations: titled("Add Email Account", localWrite),
-			},
-			async (input) =>
-				observeTool("email_add_account", async () => {
-					if (!input.password && !input.accessToken) {
-						throw new Error("Provide either password or accessToken");
-					}
-					if (!input.smtpHost && input.smtpPort)
-						throw new Error("smtpHost is required when smtpPort is provided");
-					const account = await store.add({
-						name: input.name,
-						email: input.email,
-						aliases: input.aliases,
-						defaultFrom: input.defaultFrom,
-						imap: {
-							host: input.imapHost,
-							port: input.imapPort,
-							secure: input.imapSecure,
-						},
-						smtp: input.smtpHost
-							? {
-									host: input.smtpHost,
-									port: input.smtpPort ?? 465,
-									secure: input.smtpSecure,
-								}
-							: undefined,
-						auth: input.password
-							? { type: "password", password: input.password }
-							: {
-									type: "oauth2",
-									accessToken: input.accessToken!,
-									refreshToken: input.refreshToken,
-									clientId: input.oauthClientId,
-									tenant: input.oauthTenant,
-									expiresAt: input.tokenExpiresAt,
-								},
-					});
-					return text({
-						id: account.id,
-						name: account.name,
-						email: account.email,
-						...senderSettings(account),
-						capabilities: {
-							imap: true,
-							smtp: Boolean(account.smtp),
-							canSend: Boolean(account.smtp),
-						},
-					});
-				}),
-		);
-
-		this.server.registerTool(
 			"email_list_accounts",
 			{
 				description:
-					"List, show, or lookup configured email accounts. Returns account IDs, names, login email addresses, aliases, defaultFrom, connection settings, auth type, and whether sending is available without exposing credentials. Use this before tools that require accountId. Use email_update_account_sender to change aliases or the default From address without changing login credentials. Do not use to search or read messages.",
+					"List, show, or lookup configured email accounts. Returns account IDs, names, login email addresses, connection settings, and auth type without exposing credentials. Use this before tools that require accountId. Do not use to search or read messages.",
 				inputSchema: {},
 				outputSchema: {
 					accounts: z.array(
@@ -313,81 +110,24 @@ export class MyMCP extends McpAgent<MailEnv> {
 							id: z.string(),
 							name: z.string(),
 							email: z.string(),
-							...senderOutput,
 							imap: serverConfigOutput,
-							smtp: serverConfigOutput.optional(),
-							capabilities: capabilitiesOutput,
-							authType: z.enum(["password", "oauth2"]),
+							authType: z.enum(["password"]),
 						}),
 					),
 				},
-				annotations: titled("List Email Accounts", annotations(true, false, true, false)),
+				annotations: titled("List Email Accounts", remoteRead),
 			},
 			async () =>
 				observeTool("email_list_accounts", async () => {
 					const accounts = await store.list();
-					const result = accounts.map(
-						({ id, name, email, aliases, defaultFrom, imap, smtp, auth }) => ({
-							id,
-							name,
-							email,
-							...senderSettings({ email, aliases, defaultFrom }),
-							imap,
-							smtp,
-							capabilities: {
-								imap: true,
-								smtp: Boolean(smtp),
-								canSend: Boolean(smtp),
-							},
-							authType: auth.type,
-						}),
-					);
+					const result = accounts.map(({ id, name, email, imap, auth }) => ({
+						id,
+						name,
+						email,
+						imap,
+						authType: auth.type,
+					}));
 					return text(result, { accounts: result });
-				}),
-		);
-
-		this.server.registerTool(
-			"email_update_account_sender",
-			{
-				description:
-					"Change, update, or reset an account's email address aliases and default From address using accountId from email_list_accounts. Returns accountId, login email, aliases, and effective defaultFrom. Side effect: updates only this MCP server's local encrypted sender configuration; does not change login credentials, create provider aliases, change provider settings, modify existing drafts, or send mail. Addresses must already be authorized at the provider. Use before draft creation to change the default; use email_update_message_draft with from to change an existing draft's sender.",
-				inputSchema: { ...accountSelector, ...senderInputs },
-				outputSchema: { accountId: z.string(), email: z.string(), ...senderOutput },
-				annotations: titled(
-					"Update Account Sender",
-					annotations(false, false, true, false),
-				),
-			},
-			async ({ accountId, aliases, defaultFrom }) =>
-				observeTool("email_update_account_sender", async () => {
-					if (aliases === undefined && defaultFrom === undefined)
-						throw new Error("Provide aliases or defaultFrom to update sender settings");
-					return text(
-						await store.updateSender(accountId, {
-							...(aliases !== undefined ? { aliases } : {}),
-							...(defaultFrom !== undefined ? { defaultFrom } : {}),
-						}),
-					);
-				}),
-		);
-
-		this.server.registerTool(
-			"email_remove_account",
-			{
-				description:
-					"Remove or delete a configured account from this MCP server and discard its encrypted credentials. Side effect: removes only the local account configuration; it does not delete mailbox messages from the provider.",
-				inputSchema: {
-					accountId: z
-						.string()
-						.describe("Configured account ID returned by email_list_accounts."),
-				},
-				outputSchema: { removed: z.string() },
-				annotations: titled("Remove Email Account", localDelete),
-			},
-			async ({ accountId }) =>
-				observeTool("email_remove_account", async () => {
-					await store.remove(accountId);
-					return text({ removed: accountId });
 				}),
 		);
 
@@ -395,15 +135,13 @@ export class MyMCP extends McpAgent<MailEnv> {
 			"email_test_connection",
 			{
 				description:
-					"Test, check, or verify a configured account connection by authenticating to IMAP and, when SMTP is configured, SMTP. Returns connection capabilities and send availability. Use for troubleshooting account setup; do not use to list folders or search messages.",
+					"Test, check, or verify a configured account connection by authenticating to IMAP. Returns connection capabilities. Use for troubleshooting account setup; do not use to list folders or search messages.",
 				inputSchema: accountSelector,
 				outputSchema: {
 					connected: z.boolean(),
 					accountId: z.string(),
 					email: z.string(),
 					capabilities: z.array(z.string()),
-					smtpConfigured: z.boolean(),
-					smtpConnected: z.boolean().optional(),
 				},
 				annotations: titled("Test Email Connection", remoteRead),
 			},
@@ -417,7 +155,7 @@ export class MyMCP extends McpAgent<MailEnv> {
 			"email_list_folders",
 			{
 				description:
-					"List, show, or lookup exact IMAP folder paths and special-use flags for one configured account. Returns folder path, display name, and flags. Use before status, search, move, trash, or delete when the exact folder is not known; does not return message summaries or message contents.",
+					"List, show, or lookup exact IMAP folder paths and special-use flags for one configured account. Returns folder path, display name, and flags. Use before status or search when the exact folder is not known; does not return message summaries or message contents.",
 				inputSchema: accountSelector,
 				outputSchema: {
 					folders: z.array(
@@ -514,7 +252,7 @@ export class MyMCP extends McpAgent<MailEnv> {
 			["email_search_messages"],
 			{
 				description:
-					"Find, search, lookup, locate, or show message summaries in one account and one folder using sender, recipient, subject, keywords, dates, size, flags, Message-ID, or free text filters. Returns message summaries with accountId, folder, IMAP UID, headers, dates, flags, counts, and nextCursor. Use before get, move, archive, trash, permanently delete, or flag updates when you do not already know the IMAP UID. Do not use to retrieve full message contents.",
+					"Find, search, lookup, locate, or show message summaries in one account and one folder using sender, recipient, subject, keywords, dates, size, flags, Message-ID, or free text filters. Returns message summaries with accountId, folder, IMAP UID, headers, dates, flags, counts, and nextCursor. Use before get when you do not already know the IMAP UID. Do not use to retrieve full message contents.",
 				inputSchema: {
 					...accountSelector,
 					folder: z
@@ -661,7 +399,7 @@ export class MyMCP extends McpAgent<MailEnv> {
 			["email_search_all_accounts"],
 			{
 				description:
-					"Find, search, lookup, locate, or show message summaries across all configured accounts or selected accountIds in one folder using sender, recipient, subject, keywords, dates, size, flags, Message-ID, or free text filters. Returns a flat message summary list with account identity plus per-account totals, nextCursor values, and errors. Use before get, move, archive, trash, permanently delete, or flag updates when you do not already know the accountId, folder, and IMAP UID. Do not use to retrieve full message contents.",
+					"Find, search, lookup, locate, or show message summaries across all configured accounts or selected accountIds in one folder using sender, recipient, subject, keywords, dates, size, flags, Message-ID, or free text filters. Returns a flat message summary list with account identity plus per-account totals, nextCursor values, and errors. Use before get when you do not already know the accountId, folder, and IMAP UID. Do not use to retrieve full message contents.",
 				inputSchema: {
 					...accountIdsSelector,
 					folder: z
@@ -963,427 +701,6 @@ export class MyMCP extends McpAgent<MailEnv> {
 				async ({ accountId, folder, uid, limit }: any) =>
 					observeTool(toolName, async () =>
 						text(await mail.getThread(accountId, folder, uid, limit)),
-					),
-		);
-
-		registerTools(
-			["email_update_message_flags"],
-			{
-				description:
-					"Mark, update, set, or clear read/unread and flagged states for one message or a batch in one account and folder. Requires folder and IMAP UID values from email_search_messages, email_search_all_accounts, or email_get_message_thread. Side effect: updates message flags only; does not move, archive, trash, permanently delete, or send messages.",
-				inputSchema: {
-					...accountSelector,
-					folder: z
-						.string()
-						.default("INBOX")
-						.describe(
-							"Exact IMAP folder path returned by email_list_folders; defaults to INBOX.",
-						),
-					uid: uidSchema.describe(
-						"One IMAP UID or up to 100 IMAP UIDs returned by search/get/thread results; not Message-ID headers.",
-					),
-					seen: z
-						.boolean()
-						.optional()
-						.describe(
-							"True marks messages read/seen; false marks messages unread/unseen.",
-						),
-					flagged: z
-						.boolean()
-						.optional()
-						.describe("True flags messages; false unflags messages."),
-				},
-				outputSchema: {
-					uid: uidSchema,
-					seen: z.boolean().optional(),
-					flagged: z.boolean().optional(),
-				},
-				annotations: titled("Mark Email", remoteUpdate),
-			},
-			(toolName) => async (input: any) =>
-				observeTool(toolName, async () => {
-					if (input.seen === undefined && input.flagged === undefined)
-						throw new Error("Provide seen, flagged, or both");
-					return text(
-						await mail.mark(input.accountId, input.folder, input.uid, {
-							seen: input.seen,
-							flagged: input.flagged,
-						}),
-					);
-				}),
-		);
-
-		registerTools(
-			["email_move_messages"],
-			{
-				description:
-					"Move or file one message or a batch from one folder to another folder in the same account. Requires source folder, IMAP UID values, and exact targetFolder from email_list_folders. Side effect: moves messages out of the source folder. Use email_search_messages first if you do not know the IMAP UID; use email_archive_messages for archive and email_move_messages_to_trash for trash.",
-				inputSchema: {
-					...accountSelector,
-					folder: z
-						.string()
-						.default("INBOX")
-						.describe(
-							"Exact IMAP folder path returned by email_list_folders; defaults to INBOX.",
-						),
-					uid: uidSchema.describe(
-						"One IMAP UID or up to 100 IMAP UIDs returned by search/get/thread results; not Message-ID headers.",
-					),
-					targetFolder: z
-						.string()
-						.describe(
-							"Exact destination IMAP folder path returned by email_list_folders.",
-						),
-				},
-				outputSchema: { uid: uidSchema, from: z.string(), to: z.string() },
-				annotations: titled("Move Email", remoteMove),
-			},
-			(toolName) => async (input: any) =>
-				observeTool(toolName, async () =>
-					text(
-						await mail.move(
-							input.accountId,
-							input.folder,
-							input.uid,
-							input.targetFolder,
-						),
-					),
-				),
-		);
-
-		registerTools(
-			["email_archive_messages"],
-			{
-				description:
-					"Archive one message or a batch in one account without manually finding the archive folder. Requires folder and IMAP UID values from search/get/thread results. Side effect: moves messages to the account's IMAP Archive folder, or provider all-mail folder when that is the advertised archive destination. Use email_search_messages or email_list_all_inbox_messages first if you do not know the IMAP UID. Do not use to trash or permanently delete messages.",
-				inputSchema: {
-					...accountSelector,
-					folder: z
-						.string()
-						.default("INBOX")
-						.describe(
-							"Exact IMAP folder path returned by email_list_folders; defaults to INBOX.",
-						),
-					uid: uidSchema.describe(
-						"One IMAP UID or up to 100 IMAP UIDs returned by search/get/thread results; not Message-ID headers.",
-					),
-				},
-				outputSchema: {
-					uid: uidSchema,
-					from: z.string(),
-					to: z.string(),
-					archived: z.boolean(),
-				},
-				annotations: titled("Archive Email", remoteMove),
-			},
-			(toolName) => async (input: any) =>
-				observeTool(toolName, async () =>
-					text(await mail.archive(input.accountId, input.folder, input.uid)),
-				),
-		);
-
-		registerTools(
-			["email_move_messages_to_trash"],
-			{
-				description:
-					"Move, trash, or delete-to-trash one message or a batch in one account. Requires folder and IMAP UID values from search/get/thread results. Side effect: moves messages to the account's IMAP Trash folder; this is normal deletion and not permanent deletion. Use email_delete_messages_permanently only when the user explicitly wants permanent deletion.",
-				inputSchema: {
-					...accountSelector,
-					folder: z
-						.string()
-						.default("INBOX")
-						.describe(
-							"Exact IMAP folder path returned by email_list_folders; defaults to INBOX.",
-						),
-					uid: uidSchema.describe(
-						"One IMAP UID or up to 100 IMAP UIDs returned by search/get/thread results; not Message-ID headers.",
-					),
-				},
-				outputSchema: {
-					uid: uidSchema,
-					from: z.string(),
-					to: z.string(),
-					trashed: z.boolean(),
-				},
-				annotations: titled("Move Email to Trash", remoteMove),
-			},
-			(toolName) => async (input: any) =>
-				observeTool(toolName, async () =>
-					text(await mail.trash(input.accountId, input.folder, input.uid)),
-				),
-		);
-
-		registerTools(
-			["email_delete_messages_permanently"],
-			{
-				description:
-					"Permanently delete, expunge, or remove one message or a batch from one account and folder. Requires folder and IMAP UID values from search/get/thread results. Dangerous side effect: marks messages deleted and expunges them; use email_move_messages_to_trash for normal deletion.",
-				inputSchema: {
-					...accountSelector,
-					folder: z
-						.string()
-						.default("INBOX")
-						.describe(
-							"Exact IMAP folder path returned by email_list_folders; defaults to INBOX.",
-						),
-					uid: uidSchema.describe(
-						"One IMAP UID or up to 100 IMAP UIDs returned by search/get/thread results; not Message-ID headers.",
-					),
-				},
-				outputSchema: { uid: uidSchema, deleted: z.boolean() },
-				annotations: titled("Delete Email", remoteDelete),
-			},
-			(toolName) => async (input: any) =>
-				observeTool(toolName, async () =>
-					text(await mail.delete(input.accountId, input.folder, input.uid)),
-				),
-		);
-
-		registerTools(
-			["email_create_message_draft"],
-			{
-				description:
-					"Compose, create, or prepare a new email draft or reply draft without sending it. For a reply, provide replyToMessage with the original folder and IMAP UID; for a new message, provide to, subject, and text or HTML. Side effect: creates a draft in the IMAP Drafts folder and returns the selected From address, draft folder, IMAP UID, and Message-ID. Uses defaultFrom from email_list_accounts unless from selects another configured alias. Do not use to send; use email_send_draft after reviewing or updating the draft.",
-				inputSchema: {
-					...accountSelector,
-					from: draftFromSchema,
-					to: recipientSchema
-						.optional()
-						.describe(
-							"Required for a new message; optional recipient override for a reply draft.",
-						),
-					cc: optionalRecipientSchema
-						.optional()
-						.describe("Optional Cc recipient or recipients for the draft."),
-					bcc: optionalRecipientSchema
-						.optional()
-						.describe("Optional Bcc recipient or recipients for the draft."),
-					replyTo: replyToSchema
-						.optional()
-						.describe(
-							"Optional Reply-To email address to include on the draft for recipient replies.",
-						),
-					subject: z
-						.string()
-						.optional()
-						.describe(
-							"Required for a new message; defaults to Re: original subject for a reply draft.",
-						),
-					text: z.string().optional().describe("Plain text body for the draft."),
-					html: z.string().optional().describe("HTML body for the draft."),
-					replyToMessage: z
-						.object({
-							folder: z
-								.string()
-								.describe(
-									"Exact IMAP folder path returned by email_list_folders that contains the original message.",
-								),
-							uid: z
-								.number()
-								.int()
-								.positive()
-								.describe(
-									"IMAP UID of the original message returned by search/get/thread results; not the Message-ID header.",
-								),
-							replyAll: z
-								.boolean()
-								.default(false)
-								.describe(
-									"True includes original To and Cc recipients where appropriate.",
-								),
-							quoteOriginal: z
-								.boolean()
-								.default(true)
-								.describe(
-									"True quotes original message content in the reply draft; defaults to true unless the user explicitly asks not to quote it.",
-								),
-						})
-						.describe(
-							"Original message reference used to create a reply draft; requires folder and IMAP UID.",
-						)
-						.optional(),
-					attachments: z
-						.array(attachmentSchema)
-						.max(20)
-						.optional()
-						.describe(
-							"Up to 20 attachments; contentBase64 must be raw attachment bytes encoded as base64, not message text or HTML.",
-						),
-				},
-				outputSchema: draftLocationOutput,
-				annotations: titled("Create Email Draft", remoteCreate),
-			},
-			(toolName) => async (input: any) =>
-				observeTool(toolName, async () => {
-					if (!input.text && !input.html)
-						throw new Error("Provide text or html message content");
-					if (!input.replyToMessage && !input.to)
-						throw new Error(
-							"Provide to for a new message or replyToMessage for a reply",
-						);
-					if (!input.replyToMessage && input.subject === undefined)
-						throw new Error("Provide subject for a new message");
-					return text(await mail.createDraft(input));
-				}),
-		);
-
-		registerTools(
-			["email_create_forward_draft"],
-			{
-				description:
-					"Create, compose, or prepare a forward draft from one existing message without sending it. Requires source folder and IMAP UID returned by search/get/thread results plus destination recipients. Side effect: creates a new draft in the IMAP Drafts folder, optionally copying original attachments, and returns From address, draft folder, IMAP UID, and Message-ID. Uses defaultFrom unless from selects another configured alias. Do not use to send; use email_send_draft after draft creation.",
-				inputSchema: {
-					...accountSelector,
-					from: draftFromSchema,
-					folder: z
-						.string()
-						.default("INBOX")
-						.describe(
-							"Exact IMAP folder path returned by email_list_folders; defaults to INBOX.",
-						),
-					uid: z
-						.number()
-						.int()
-						.positive()
-						.describe(
-							"IMAP UID returned by search/get/thread results; not the email Message-ID header.",
-						),
-					to: recipientSchema.describe("Recipient or recipients for the forward draft."),
-					cc: optionalRecipientSchema
-						.optional()
-						.describe("Optional Cc recipient or recipients for the forward draft."),
-					bcc: optionalRecipientSchema
-						.optional()
-						.describe("Optional Bcc recipient or recipients for the forward draft."),
-					replyTo: replyToSchema
-						.optional()
-						.describe(
-							"Optional Reply-To email address to include on the forward draft for recipient replies.",
-						),
-					subject: z
-						.string()
-						.optional()
-						.describe("Optional subject override for the forward draft."),
-					text: z
-						.string()
-						.optional()
-						.describe("Optional plain text intro written above the forwarded message."),
-					html: z
-						.string()
-						.optional()
-						.describe("Optional HTML intro written above the forwarded message."),
-					includeAttachments: z
-						.boolean()
-						.default(true)
-						.describe(
-							"True copies original attachments into the forward draft; defaults to true.",
-						),
-				},
-				outputSchema: draftLocationOutput,
-				annotations: titled("Create Forward Draft", remoteCreate),
-			},
-			(toolName) => async (input: any) =>
-				observeTool(toolName, async () => text(await mail.createForwardDraft(input))),
-		);
-
-		registerTools(
-			["email_update_message_draft"],
-			{
-				description:
-					"Edit, update, or replace an existing IMAP draft without sending it. Requires draft folder and draft IMAP UID returned by email_create_message_draft, email_create_forward_draft, email_update_message_draft, or search results for drafts. Side effect: replaces the draft and returns its From address, Message-ID, new draft folder, and IMAP UID. Omitted from preserves the existing sender; set from to change it to an address from email_list_accounts. Do not use for non-draft messages or to send; use email_send_draft to send.",
-				inputSchema: {
-					...accountSelector,
-					from: draftFromSchema,
-					folder: z
-						.string()
-						.describe("Exact IMAP Drafts folder path containing the draft."),
-					uid: z
-						.number()
-						.int()
-						.positive()
-						.describe("IMAP UID of the existing draft; not the Message-ID header."),
-					to: recipientSchema
-						.optional()
-						.describe("Optional replacement To recipients for the draft."),
-					cc: optionalRecipientSchema
-						.optional()
-						.describe("Optional replacement Cc recipients for the draft."),
-					bcc: optionalRecipientSchema
-						.optional()
-						.describe("Optional replacement Bcc recipients for the draft."),
-					replyTo: replyToSchema
-						.optional()
-						.describe(
-							"Optional replacement Reply-To email address for recipient replies.",
-						),
-					subject: z
-						.string()
-						.optional()
-						.describe("Optional replacement subject for the draft."),
-					text: z
-						.string()
-						.optional()
-						.describe("Optional replacement plain text body for the draft."),
-					html: z
-						.string()
-						.optional()
-						.describe("Optional replacement HTML body for the draft."),
-					attachments: z
-						.array(attachmentSchema)
-						.max(20)
-						.optional()
-						.describe(
-							"Omit to preserve existing attachments; pass an empty array to remove all attachments. contentBase64 must be raw attachment bytes encoded as base64, not message text or HTML.",
-						),
-				},
-				outputSchema: {
-					...draftLocationOutput,
-					replaced: z.object({ folder: z.string(), uid: z.number().int() }),
-				},
-				annotations: titled("Edit Email Draft", remoteUpdate),
-			},
-			(toolName) => async (input: any) =>
-				observeTool(toolName, async () => text(await mail.editDraft(input))),
-		);
-
-		registerTools(
-			["email_send_draft"],
-			{
-				description:
-					"Send an existing draft email using SMTP with its saved From address as the SMTP sender; the address must still be configured on the account. Returns the From address, accepted/rejected recipients, message ID when available, and sent-copy/draft-cleanup status. Changing defaultFrom does not change existing drafts; use email_update_message_draft with from first when needed. Requires draft folder and draft IMAP UID returned by email_create_message_draft, email_create_forward_draft, or email_update_message_draft. Side effects: sends the message, appends a copy to the IMAP Sent folder when possible, and deletes the draft after SMTP accepts it. Do not use to compose or edit a draft.",
-				inputSchema: {
-					...accountSelector,
-					folder: z
-						.string()
-						.describe("Exact IMAP Drafts folder path returned by a draft tool."),
-					uid: z
-						.number()
-						.int()
-						.positive()
-						.describe(
-							"Draft IMAP UID returned by a draft tool; not the Message-ID header.",
-						),
-				},
-				outputSchema: {
-					messageId: z.string().optional(),
-					from: z.string().describe("From address used for SMTP sending."),
-					accepted: z.array(z.string()),
-					rejected: z.array(z.string()),
-					accountId: z.string(),
-					folder: z.string(),
-					uid: z.number().int(),
-					sentSaved: z.boolean(),
-					sentFolder: z.string().optional(),
-					sentUid: z.number().int().optional(),
-					sentError: z.string().optional(),
-					draftDeleted: z.boolean(),
-				},
-				annotations: titled("Send Email Draft", remoteSend),
-			},
-			(toolName) =>
-				async ({ accountId, folder, uid }: any) =>
-					observeTool(toolName, async () =>
-						text(await mail.sendDraft(accountId, folder, uid)),
 					),
 		);
 	}

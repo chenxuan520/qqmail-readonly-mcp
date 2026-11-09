@@ -11,13 +11,13 @@ export function buildCloudflareConfig(environment = process.env) {
 
 	return {
 		$schema: "node_modules/wrangler/config-schema.json",
-		name: "email-mcp-server",
+		name: "qqmail-readonly-mcp",
 		main: "src/index.ts",
 		compatibility_date: "2026-06-14",
 		compatibility_flags: ["nodejs_compat"],
 		keep_vars: true,
 		secrets: {
-			required: ["CREDENTIAL_ENCRYPTION_KEY", "OUTLOOK_CLIENT_SECRET"],
+			required: ["CREDENTIAL_ENCRYPTION_KEY"],
 		},
 		migrations: [
 			{

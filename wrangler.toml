@@ -1,4 +1,4 @@
-name = "email-mcp-server"
+name = "qqmail-readonly-mcp"
 main = "src/index.ts"
 compatibility_date = "2026-06-14"
 compatibility_flags = ["nodejs_compat"]
@@ -18,8 +18,7 @@ id = "replace-with-your-kv-namespace-id"
 [vars]
 TEAM_DOMAIN = "https://your-team.cloudflareaccess.com"
 POLICY_AUD = "replace-with-your-access-application-aud-tag"
-OUTLOOK_TENANT = "consumers"
-OUTLOOK_CLIENT_ID = "00000000-0000-0000-0000-000000000000"
+ALLOWED_IMAP_HOSTS = "imap.qq.com"
 
 [observability]
 enabled = true

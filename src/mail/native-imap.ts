@@ -7,12 +7,6 @@ interface ImapResponse {
 	literal?: Uint8Array;
 }
 
-interface ListedFolder {
-	path: string;
-	name: string;
-	flags: string[];
-}
-
 export interface SearchInput {
 	folder: string;
 	from?: string;
@@ -40,6 +34,8 @@ export interface SearchInput {
 	offset?: number;
 	sortOrder?: "newest" | "oldest";
 }
+
+const MAX_MESSAGE_BYTES = 25 * 1024 * 1024;
 
 export class NativeImapSession {
 	private socket?: Socket;
@@ -124,7 +120,7 @@ export class NativeImapSession {
 	async search(input: SearchInput) {
 		const folder = input.folder;
 		const criteria = ["ALL"];
-		await this.select(folder, true);
+		await this.examine(folder);
 		if (input.from) criteria.push("FROM", quote(input.from));
 		if (input.to) criteria.push("TO", quote(input.to));
 		if (input.cc) criteria.push("CC", quote(input.cc));
@@ -164,14 +160,14 @@ export class NativeImapSession {
 	}
 
 	async getThread(folder: string, uid: number, limit: number) {
-		const original = await this.getMessage(folder, uid);
-		const headers = parseHeaders(decode(original.source));
+		const source = await this.fetchHeaderSource(folder, uid);
+		const headers = parseHeaders(decode(source));
 		const messageId = headers["message-id"];
 		if (!messageId) throw new Error(`Message UID ${uid} has no Message-ID header`);
 		const references = parseMessageIds(headers.references);
 		const rootMessageId =
 			references[0] ?? parseMessageIds(headers["in-reply-to"])[0] ?? messageId;
-		await this.select(folder, true);
+		await this.examine(folder);
 		const search = await this.command(
 			`UID SEARCH OR OR HEADER Message-ID ${quote(rootMessageId)} HEADER References ${quote(rootMessageId)} HEADER In-Reply-To ${quote(rootMessageId)}`,
 		);
@@ -193,7 +189,15 @@ export class NativeImapSession {
 		folder: string,
 		uid: number,
 	): Promise<{ source: Uint8Array; flags: string[] }> {
-		await this.select(folder, true);
+		await this.examine(folder);
+		const sizeResponses = await this.command(`UID FETCH ${uid} (UID FLAGS RFC822.SIZE)`);
+		const sizeLine = sizeResponses.map(({ line }) => line).join(" ");
+		if (!/\bUID \d+/i.test(sizeLine)) throw new Error(`Message UID ${uid} not found`);
+		const size = Number(sizeLine.match(/RFC822\.SIZE (\d+)/i)?.[1]);
+		if (Number.isFinite(size) && size > MAX_MESSAGE_BYTES)
+			throw new Error(
+				`Message UID ${uid} is ${Math.ceil(size / 1024 / 1024)} MB, which exceeds the ${MAX_MESSAGE_BYTES / 1024 / 1024} MB read limit`,
+			);
 		const responses = await this.command(`UID FETCH ${uid} (UID FLAGS BODY.PEEK[])`);
 		const fetch = responses.find((response) => response.literal);
 		if (!fetch?.literal) throw new Error(`Message UID ${uid} not found`);
@@ -201,146 +205,6 @@ export class NativeImapSession {
 			source: fetch.literal,
 			flags: parseFlags(responses.map(({ line }) => line).join(" ")),
 		};
-	}
-
-	async createDraft(
-		source: Uint8Array,
-		messageId: string,
-	): Promise<{ folder: string; uid: number }> {
-		const drafts = findDraftsFolder(await this.listFolders());
-		if (!drafts) throw new Error("The account does not advertise a Drafts folder");
-		const appendedUid = await this.appendMessage(
-			drafts.path,
-			["\\Draft"],
-			source,
-			messageId,
-			"Draft",
-		);
-		return { folder: drafts.path, uid: appendedUid };
-	}
-
-	async saveSent(
-		source: Uint8Array,
-		messageId: string | undefined,
-	): Promise<{ folder: string; uid: number }> {
-		const sent = findSentFolder(await this.listFolders());
-		if (!sent) throw new Error("The account does not advertise a Sent folder");
-		const appendedUid = await this.appendMessage(
-			sent.path,
-			["\\Seen"],
-			source,
-			messageId,
-			"Sent message",
-		);
-		return { folder: sent.path, uid: appendedUid };
-	}
-
-	private async appendMessage(
-		folder: string,
-		flags: string[],
-		source: Uint8Array,
-		messageId: string | undefined,
-		label: string,
-	): Promise<number> {
-		const tag = `A${String(++this.tag).padStart(4, "0")}`;
-		const flagList = flags.length ? ` (${flags.join(" ")})` : "";
-		await this.writer!.write(
-			new TextEncoder().encode(
-				`${tag} APPEND ${quote(folder)}${flagList} {${source.byteLength}}\r\n`,
-			),
-		);
-		const continuation = decode(
-			await withTimeout(this.readLine(), 20_000, "IMAP APPEND continuation timed out"),
-		);
-		if (!continuation.startsWith("+"))
-			throw new Error(`IMAP APPEND failed: ${redact(continuation)}`);
-		const payload = new Uint8Array(source.byteLength + 2);
-		payload.set(source);
-		payload.set([13, 10], source.byteLength);
-		await this.writer!.write(payload);
-		let appendedUid: number | undefined;
-		while (true) {
-			const line = decode(
-				await withTimeout(this.readLine(), 30_000, "IMAP APPEND timed out"),
-			);
-			if (!line.startsWith(`${tag} `)) continue;
-			const status = line
-				.slice(tag.length + 1)
-				.split(" ", 1)[0]
-				.toUpperCase();
-			if (status !== "OK") throw new Error(`IMAP APPEND failed: ${redact(line)}`);
-			appendedUid = Number(line.match(/APPENDUID \d+ (\d+)/i)?.[1]) || undefined;
-			break;
-		}
-		if (!appendedUid && messageId) {
-			await this.select(folder, true);
-			const search = await this.command(`UID SEARCH HEADER Message-ID ${quote(messageId)}`);
-			const found = search.find(({ line }) => line.startsWith("* SEARCH"));
-			const parts = found?.line.trim().split(/\s+/) ?? [];
-			appendedUid = Number(parts[parts.length - 1]);
-		}
-		if (!appendedUid)
-			throw new Error(`${label} was appended but its UID could not be determined`);
-		return appendedUid;
-	}
-
-	async replaceDraft(
-		folder: string,
-		uid: number,
-		source: Uint8Array,
-		messageId: string,
-	): Promise<{ folder: string; uid: number }> {
-		const replacement = await this.createDraft(source, messageId);
-		await this.delete(folder, uid);
-		return replacement;
-	}
-
-	async mark(
-		folder: string,
-		uid: number | number[],
-		states: { seen?: boolean; flagged?: boolean },
-	): Promise<void> {
-		await this.select(folder, false);
-		const uids = uidSet(uid);
-		if (states.seen !== undefined)
-			await this.command(`UID STORE ${uids} ${states.seen ? "+" : "-"}FLAGS.SILENT (\\Seen)`);
-		if (states.flagged !== undefined)
-			await this.command(
-				`UID STORE ${uids} ${states.flagged ? "+" : "-"}FLAGS.SILENT (\\Flagged)`,
-			);
-	}
-
-	async move(folder: string, uid: number | number[], targetFolder: string): Promise<void> {
-		await this.select(folder, false);
-		const uids = [...new Set(Array.isArray(uid) ? uid : [uid])];
-		if (uids.length === 0) throw new Error("At least one UID is required");
-		await this.command(`UID MOVE ${uids.join(",")} ${quote(targetFolder)}`);
-	}
-
-	async trash(folder: string, uid: number | number[]): Promise<{ folder: string }> {
-		const trash = (await this.listFolders()).find((candidate) =>
-			candidate.flags.some((flag) => flag.toLowerCase() === "\\trash"),
-		);
-		if (!trash) throw new Error("The account does not advertise a Trash folder");
-		if (trash.path === folder) throw new Error("Messages are already in the Trash folder");
-		await this.move(folder, uid, trash.path);
-		return { folder: trash.path };
-	}
-
-	async archive(folder: string, uid: number | number[]): Promise<{ folder: string }> {
-		const archive = findArchiveFolder(await this.listFolders());
-		if (!archive) throw new Error("The account does not advertise an Archive folder");
-		if (archive.path === folder) throw new Error("Messages are already in the Archive folder");
-		await this.move(folder, uid, archive.path);
-		return { folder: archive.path };
-	}
-
-	async delete(folder: string, uid: number | number[]): Promise<void> {
-		await this.select(folder, false);
-		const uids = uidSet(uid);
-		await this.command(`UID STORE ${uids} +FLAGS.SILENT (\\Deleted)`);
-		const capabilities = await this.capabilities();
-		await this.command(capabilities.includes("UIDPLUS") ? `UID EXPUNGE ${uids}` : "EXPUNGE");
 	}
 
 	async close(): Promise<void> {
@@ -354,8 +218,16 @@ export class NativeImapSession {
 		}
 	}
 
-	private async select(folder: string, readOnly: boolean): Promise<void> {
-		await this.command(`${readOnly ? "EXAMINE" : "SELECT"} ${quote(folder)}`);
+	private async examine(folder: string): Promise<void> {
+		await this.command(`EXAMINE ${quote(folder)}`);
+	}
+
+	private async fetchHeaderSource(folder: string, uid: number): Promise<Uint8Array> {
+		await this.examine(folder);
+		const responses = await this.command(`UID FETCH ${uid} (UID BODY.PEEK[HEADER])`);
+		const fetch = responses.find((response) => response.literal);
+		if (!fetch?.literal) throw new Error(`Message UID ${uid} not found`);
+		return fetch.literal;
 	}
 
 	private async fetchSummaries(folder: string, uids: number[]) {
@@ -392,14 +264,9 @@ export class NativeImapSession {
 	}
 
 	private async authenticate(): Promise<void> {
-		if (this.account.auth.type === "password") {
-			await this.command(
-				`LOGIN ${quote(this.account.email)} ${quote(this.account.auth.password)}`,
-			);
-			return;
-		}
-		const payload = `user=${this.account.email}\x01auth=Bearer ${this.account.auth.accessToken}\x01\x01`;
-		await this.command(`AUTHENTICATE XOAUTH2 ${btoa(payload)}`);
+		await this.command(
+			`LOGIN ${quote(this.account.email)} ${quote(this.account.auth.password)}`,
+		);
 	}
 
 	private async startTls(): Promise<void> {
@@ -474,72 +341,6 @@ export class NativeImapSession {
 	}
 }
 
-function findDraftsFolder(folders: ListedFolder[]): ListedFolder | undefined {
-	const flagged = folders.find((folder) =>
-		folder.flags.some((flag) => ["\\draft", "\\drafts"].includes(flag.toLowerCase())),
-	);
-	if (flagged) return flagged;
-
-	const draftNames = new Set(["drafts", "draft", "draft messages"]);
-	const exact = folders.find((folder) => draftNames.has(folder.name.toLowerCase()));
-	if (exact) return exact;
-
-	return folders.find((folder) =>
-		folder.path
-			.toLowerCase()
-			.split(/[/.]/)
-			.some((segment) => draftNames.has(segment.trim())),
-	);
-}
-
-function findSentFolder(folders: ListedFolder[]): ListedFolder | undefined {
-	const flagged = folders.find((folder) =>
-		folder.flags.some((flag) => ["\\sent", "\\sentmail"].includes(flag.toLowerCase())),
-	);
-	if (flagged) return flagged;
-
-	const sentNames = new Set(["sent", "sent mail", "sent messages", "sent items"]);
-	const exact = folders.find((folder) => sentNames.has(folder.name.toLowerCase()));
-	if (exact) return exact;
-
-	return folders.find((folder) =>
-		folder.path
-			.toLowerCase()
-			.split(/[/.]/)
-			.some((segment) => sentNames.has(segment.trim())),
-	);
-}
-
-function findArchiveFolder(folders: ListedFolder[]): ListedFolder | undefined {
-	const flaggedArchive = folders.find((folder) =>
-		folder.flags.some((flag) => flag.toLowerCase() === "\\archive"),
-	);
-	if (flaggedArchive) return flaggedArchive;
-
-	const archiveNames = new Set(["archive", "archives"]);
-	const namedArchive = findFolderByName(folders, archiveNames);
-	if (namedArchive) return namedArchive;
-
-	const flaggedAllMail = folders.find((folder) =>
-		folder.flags.some((flag) => flag.toLowerCase() === "\\all"),
-	);
-	if (flaggedAllMail) return flaggedAllMail;
-
-	return findFolderByName(folders, new Set(["all mail"]));
-}
-
-function findFolderByName(folders: ListedFolder[], names: Set<string>): ListedFolder | undefined {
-	const exact = folders.find((folder) => names.has(folder.name.toLowerCase()));
-	if (exact) return exact;
-
-	return folders.find((folder) =>
-		folder.path
-			.toLowerCase()
-			.split(/[/.]/)
-			.some((segment) => names.has(segment.trim())),
-	);
-}
-
 function findCrlf(value: Uint8Array): number {
 	for (let index = 0; index < value.length - 1; index++)
 		if (value[index] === 13 && value[index + 1] === 10) return index;
@@ -552,12 +353,6 @@ function decode(value: Uint8Array): string {
 
 function quote(value: string): string {
 	return `"${value.replace(/(["\\])/g, "\\$1")}"`;
-}
-
-function uidSet(uid: number | number[]): string {
-	const uids = [...new Set(Array.isArray(uid) ? uid : [uid])];
-	if (uids.length === 0) throw new Error("At least one UID is required");
-	return uids.join(",");
 }
 
 function imapAtom(value: string, label: string): string {

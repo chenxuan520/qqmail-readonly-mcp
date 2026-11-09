@@ -1,22 +1,10 @@
 import { Hono, type Context } from "hono";
-import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
 import { openJson, sealJson } from "./crypto";
 import { AccountStore } from "./mail/account-store";
 import { MailService } from "./mail/mail-service";
-import { senderSettings } from "./mail/sender";
 import type { AccountAuth, MailAccount, MailEnv } from "./mail/types";
-import {
-	assertValidOutlookOAuthCallback,
-	createOutlookOAuthState,
-	type OutlookOAuthState,
-} from "./outlook-oauth";
 
 const app = new Hono<{ Bindings: MailEnv }>();
-const OUTLOOK_SCOPES =
-	"openid profile email offline_access https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send";
-const microsoftJwks = createRemoteJWKSet(
-	new URL("https://login.microsoftonline.com/common/discovery/v2.0/keys"),
-);
 
 type MailContext = Context<{ Bindings: MailEnv }>;
 
@@ -40,20 +28,13 @@ app.get("/", async (c) => {
 			managementPage(
 				accounts,
 				c.req.query("status") ||
-					(connectionFlash === "connection_ok" ||
-					connectionFlash === "connection_imap_only"
-						? connectionFlash
-						: undefined),
+					(connectionFlash === "connection_ok" ? connectionFlash : undefined),
 				undefined,
-				outlookConfigured(c.env),
 				editAccount,
 			),
 		);
 	} catch (error) {
-		return c.html(
-			managementPage([], undefined, errorMessage(error), outlookConfigured(c.env)),
-			500,
-		);
+		return c.html(managementPage([], undefined, errorMessage(error)), 500);
 	}
 });
 
@@ -63,20 +44,16 @@ app.post("/accounts", async (c) => {
 	let account: Omit<MailAccount, "id">;
 	try {
 		const form = await c.req.formData();
-		account = accountInput(form);
+		account = accountInput(c.env, form);
 	} catch (error) {
 		const accounts = await accountStore(c.env)
 			.list()
 			.catch(() => []);
-		return c.html(
-			managementPage(accounts, undefined, errorMessage(error), outlookConfigured(c.env)),
-			400,
-		);
+		return c.html(managementPage(accounts, undefined, errorMessage(error)), 400);
 	}
 
-	let testResult: { smtpConfigured: boolean };
 	try {
-		testResult = await testNewAccount(c.env, account);
+		await testNewAccount(c.env, account);
 	} catch (error) {
 		return accountTestFailureResponse(c, error, {
 			mode: "add",
@@ -87,18 +64,12 @@ app.post("/accounts", async (c) => {
 
 	try {
 		await accountStore(c.env).add(account);
-		return c.redirect(
-			testResult.smtpConfigured ? "/?status=added_tested" : "/?status=added_tested_imap_only",
-			303,
-		);
+		return c.redirect("/?status=added_tested", 303);
 	} catch (error) {
 		const accounts = await accountStore(c.env)
 			.list()
 			.catch(() => []);
-		return c.html(
-			managementPage(accounts, undefined, errorMessage(error), outlookConfigured(c.env)),
-			500,
-		);
+		return c.html(managementPage(accounts, undefined, errorMessage(error)), 500);
 	}
 });
 
@@ -112,23 +83,18 @@ app.post("/accounts/pending/retry", async (c) => {
 		return pendingAccountError(c, error);
 	}
 
-	let testResult: { smtpConfigured: boolean };
 	try {
-		testResult = await testNewAccount(c.env, pending.account);
+		await testNewAccount(c.env, pending.account);
 	} catch (error) {
 		return accountTestFailureResponse(c, error, pending);
 	}
 
 	try {
 		await persistAccountChange(c.env, pending);
-		const status = testResult.smtpConfigured
-			? pending.mode === "add"
-				? "added_tested"
-				: "updated_tested"
-			: pending.mode === "add"
-				? "added_tested_imap_only"
-				: "updated_tested_imap_only";
-		return c.redirect(`/?status=${status}`, 303);
+		return c.redirect(
+			pending.mode === "add" ? "/?status=added_tested" : "/?status=updated_tested",
+			303,
+		);
 	} catch (error) {
 		return pendingAccountError(c, error);
 	}
@@ -141,28 +107,23 @@ app.post("/accounts/pending/edit-test", async (c) => {
 	try {
 		const form = await c.req.formData();
 		pending = await pendingAccountChange(c.env, form);
-		pending.account = accountInput(form, pending.account.auth);
+		pending.account = accountInput(c.env, form, pending.account.auth);
 	} catch (error) {
 		return pendingAccountError(c, error);
 	}
 
-	let testResult: { smtpConfigured: boolean };
 	try {
-		testResult = await testNewAccount(c.env, pending.account);
+		await testNewAccount(c.env, pending.account);
 	} catch (error) {
 		return accountTestFailureResponse(c, error, pending);
 	}
 
 	try {
 		await persistAccountChange(c.env, pending);
-		const status = testResult.smtpConfigured
-			? pending.mode === "add"
-				? "added_tested"
-				: "updated_tested"
-			: pending.mode === "add"
-				? "added_tested_imap_only"
-				: "updated_tested_imap_only";
-		return c.redirect(`/?status=${status}`, 303);
+		return c.redirect(
+			pending.mode === "add" ? "/?status=added_tested" : "/?status=updated_tested",
+			303,
+		);
 	} catch (error) {
 		return pendingAccountError(c, error);
 	}
@@ -196,33 +157,17 @@ app.post("/accounts/:id/update", async (c) => {
 	try {
 		const form = await c.req.formData();
 		const existing = await store.get(c.req.param("id"));
-		account = { id: existing.id, ...accountInput(form, existing.auth) };
-		if (
-			account.email === existing.email &&
-			JSON.stringify(account.imap) === JSON.stringify(existing.imap) &&
-			JSON.stringify(account.smtp) === JSON.stringify(existing.smtp)
-		) {
-			await store.update(account);
+		account = { id: existing.id, ...accountInput(c.env, form, existing.auth) };
+		if (JSON.stringify(account) === JSON.stringify(existing))
 			return c.redirect("/?status=updated", 303);
-		}
 	} catch (error) {
 		const accounts = await store.list().catch(() => []);
 		const editAccount = accounts.find((account) => account.id === c.req.param("id"));
-		return c.html(
-			managementPage(
-				accounts,
-				undefined,
-				errorMessage(error),
-				outlookConfigured(c.env),
-				editAccount,
-			),
-			400,
-		);
+		return c.html(managementPage(accounts, undefined, errorMessage(error), editAccount), 400);
 	}
 
-	let testResult: { smtpConfigured: boolean };
 	try {
-		testResult = await testNewAccount(c.env, account);
+		await testNewAccount(c.env, account);
 	} catch (error) {
 		return accountTestFailureResponse(c, error, {
 			mode: "update",
@@ -234,12 +179,7 @@ app.post("/accounts/:id/update", async (c) => {
 
 	try {
 		await store.update(account);
-		return c.redirect(
-			testResult.smtpConfigured
-				? "/?status=updated_tested"
-				: "/?status=updated_tested_imap_only",
-			303,
-		);
+		return c.redirect("/?status=updated_tested", 303);
 	} catch (error) {
 		return pendingAccountError(c, error);
 	}
@@ -249,27 +189,16 @@ app.post("/accounts/:id/test", async (c) => {
 	if (!isTrustedFormSubmission(c.req.raw)) return c.text("Forbidden", 403);
 
 	try {
-		const mail = new MailService(accountStore(c.env), {
-			clientId: c.env.OUTLOOK_CLIENT_ID,
-			clientSecret: c.env.OUTLOOK_CLIENT_SECRET,
-		});
-		const result = await mail.testConnection(c.req.param("id"));
-		c.header(
-			"Set-Cookie",
-			connectionTestCookie(c.req.url.startsWith("https://"), result.smtpConfigured),
-		);
+		const mail = new MailService(accountStore(c.env));
+		await mail.testConnection(c.req.param("id"));
+		c.header("Set-Cookie", connectionTestCookie(c.req.url.startsWith("https://")));
 		return c.redirect("/", 303);
 	} catch (error) {
 		const accounts = await accountStore(c.env)
 			.list()
 			.catch(() => []);
 		return c.html(
-			managementPage(
-				accounts,
-				undefined,
-				`Connection test failed: ${errorMessage(error)}`,
-				outlookConfigured(c.env),
-			),
+			managementPage(accounts, undefined, `Connection test failed: ${errorMessage(error)}`),
 			502,
 		);
 	}
@@ -285,139 +214,13 @@ app.post("/accounts/:id/remove", async (c) => {
 		const accounts = await accountStore(c.env)
 			.list()
 			.catch(() => []);
-		return c.html(
-			managementPage(accounts, undefined, errorMessage(error), outlookConfigured(c.env)),
-			400,
-		);
-	}
-});
-
-app.post("/oauth/outlook/start", async (c) => {
-	if (!isTrustedFormSubmission(c.req.raw)) return c.text("Forbidden", 403);
-
-	try {
-		const config = outlookConfig(c.env);
-		const form = await c.req.formData();
-		const { oauthState, codeChallenge } = await createOutlookOAuthState(
-			validName(required(form, "name")),
-		);
-		const redirectUri = outlookRedirectUri(c.req.raw);
-		const authorize = new URL(
-			`https://login.microsoftonline.com/${config.tenant}/oauth2/v2.0/authorize`,
-		);
-		authorize.search = new URLSearchParams({
-			client_id: config.clientId,
-			response_type: "code",
-			redirect_uri: redirectUri,
-			response_mode: "query",
-			scope: OUTLOOK_SCOPES,
-			state: oauthState.state,
-			nonce: oauthState.nonce,
-			code_challenge: codeChallenge,
-			code_challenge_method: "S256",
-			prompt: "select_account",
-		}).toString();
-		c.header(
-			"Set-Cookie",
-			oauthCookie(
-				await sealJson(oauthState, c.env.CREDENTIAL_ENCRYPTION_KEY),
-				c.req.url.startsWith("https://"),
-			),
-		);
-		return c.redirect(authorize.toString(), 303);
-	} catch (error) {
-		const accounts = await accountStore(c.env)
-			.list()
-			.catch(() => []);
-		return c.html(
-			managementPage(accounts, undefined, errorMessage(error), outlookConfigured(c.env)),
-			400,
-		);
-	}
-});
-
-app.get("/oauth/outlook/callback", async (c) => {
-	try {
-		const config = outlookConfig(c.env);
-		const oauthError = c.req.query("error");
-		if (oauthError) throw new Error(`Microsoft authorization failed: ${oauthError}`);
-		const code = c.req.query("code");
-		const returnedState = c.req.query("state");
-		const sealedState = cookieValue(c.req.raw, "outlook_oauth");
-		if (!code || !returnedState || !sealedState)
-			throw new Error("Outlook authorization expired");
-		const oauthState = await openJson<OutlookOAuthState>(
-			sealedState,
-			c.env.CREDENTIAL_ENCRYPTION_KEY,
-		);
-		assertValidOutlookOAuthCallback(oauthState, returnedState);
-
-		const body = new URLSearchParams({
-			client_id: config.clientId,
-			client_secret: config.clientSecret,
-			grant_type: "authorization_code",
-			code,
-			redirect_uri: outlookRedirectUri(c.req.raw),
-			code_verifier: oauthState.codeVerifier,
-			scope: OUTLOOK_SCOPES,
-		});
-		const response = await fetch(
-			`https://login.microsoftonline.com/${config.tenant}/oauth2/v2.0/token`,
-			{
-				method: "POST",
-				headers: { "content-type": "application/x-www-form-urlencoded" },
-				body,
-			},
-		);
-		if (!response.ok) throw new Error(`Microsoft token exchange failed (${response.status})`);
-		const token = await response.json<{
-			access_token: string;
-			refresh_token?: string;
-			expires_in: number;
-			id_token: string;
-		}>();
-		if (!token.access_token || !token.refresh_token || !token.id_token)
-			throw new Error("Microsoft did not return the required OAuth tokens");
-		const identity = await verifyMicrosoftIdentity(
-			token.id_token,
-			config.clientId,
-			oauthState.nonce,
-		);
-
-		await accountStore(c.env).add({
-			name: oauthState.displayName,
-			email: identity.email,
-			imap: { host: "outlook.office365.com", port: 993, secure: true },
-			smtp: { host: "smtp.office365.com", port: 587, secure: false },
-			auth: {
-				type: "oauth2",
-				accessToken: token.access_token,
-				refreshToken: token.refresh_token,
-				clientId: config.clientId,
-				tenant: config.tenant,
-				expiresAt: Date.now() + token.expires_in * 1000,
-			},
-		});
-		c.header("Set-Cookie", clearOauthCookie(c.req.url.startsWith("https://")));
-		return c.redirect("/?status=outlook_connected", 303);
-	} catch (error) {
-		c.header("Set-Cookie", clearOauthCookie(c.req.url.startsWith("https://")));
-		const accounts = await accountStore(c.env)
-			.list()
-			.catch(() => []);
-		return c.html(
-			managementPage(accounts, undefined, errorMessage(error), outlookConfigured(c.env)),
-			400,
-		);
+		return c.html(managementPage(accounts, undefined, errorMessage(error)), 400);
 	}
 });
 
 app.get("/diagnostics/imap", async (c) => {
 	try {
-		const mail = new MailService(accountStore(c.env), {
-			clientId: c.env.OUTLOOK_CLIENT_ID,
-			clientSecret: c.env.OUTLOOK_CLIENT_SECRET,
-		});
+		const mail = new MailService(accountStore(c.env));
 		const connection = await mail.testConnection();
 		const folders = await mail.listFolders();
 		return c.json({ ...connection, folderCount: folders.length, folders });
@@ -430,15 +233,17 @@ function accountStore(env: MailEnv): AccountStore {
 	return new AccountStore(env.EMAIL_KV, env.CREDENTIAL_ENCRYPTION_KEY);
 }
 
-async function testNewAccount(
-	env: MailEnv,
-	account: Omit<MailAccount, "id">,
-): Promise<{ smtpConfigured: boolean }> {
-	const mail = new MailService(accountStore(env), {
-		clientId: env.OUTLOOK_CLIENT_ID,
-		clientSecret: env.OUTLOOK_CLIENT_SECRET,
-	});
-	return mail.testAccount({ id: "pending", ...account });
+function allowedImapHosts(env: MailEnv): string[] {
+	const configured = (env.ALLOWED_IMAP_HOSTS as string | undefined) || "imap.qq.com";
+	return configured
+		.split(",")
+		.map((host) => host.trim().toLowerCase())
+		.filter(Boolean);
+}
+
+async function testNewAccount(env: MailEnv, account: Omit<MailAccount, "id">): Promise<void> {
+	const mail = new MailService(accountStore(env));
+	await mail.testAccount({ id: "pending", ...account });
 }
 
 async function pendingAccountChange(env: MailEnv, form: FormData): Promise<PendingAccountChange> {
@@ -474,7 +279,7 @@ async function accountTestFailureResponse(
 		.catch(() => []);
 	const sealed = await sealJson(pending, c.env.CREDENTIAL_ENCRYPTION_KEY);
 	return c.html(
-		managementPage(accounts, undefined, undefined, outlookConfigured(c.env), undefined, {
+		managementPage(accounts, undefined, undefined, undefined, {
 			message: errorMessage(error),
 			pending: sealed,
 			change: pending,
@@ -487,17 +292,13 @@ async function pendingAccountError(c: MailContext, error: unknown) {
 	const accounts = await accountStore(c.env)
 		.list()
 		.catch(() => []);
-	return c.html(
-		managementPage(accounts, undefined, errorMessage(error), outlookConfigured(c.env)),
-		400,
-	);
+	return c.html(managementPage(accounts, undefined, errorMessage(error)), 400);
 }
 
 function managementPage(
 	accounts: MailAccount[],
 	status?: string,
 	error?: string,
-	outlookOAuthConfigured = false,
 	editAccount?: MailAccount,
 	accountTestFailure?: {
 		message: string;
@@ -509,55 +310,31 @@ function managementPage(
 		status === "added_tested"
 			? {
 					title: "Connection test successful",
-					message:
-						"IMAP and SMTP authentication both passed. The account has been saved.",
+					message: "IMAP authentication passed. The account has been saved.",
 				}
 			: status === "updated_tested"
 				? {
 						title: "Connection test successful",
-						message:
-							"IMAP and SMTP authentication both passed. The account changes have been saved.",
+						message: "IMAP authentication passed. The account changes have been saved.",
 					}
-				: status === "added_tested_imap_only"
+				: status === "connection_ok"
 					? {
 							title: "Connection test successful",
-							message:
-								"IMAP authentication passed and the account has been saved. SMTP is not configured, so this account cannot send email.",
+							message: "IMAP authentication passed.",
 						}
-					: status === "updated_tested_imap_only"
-						? {
-								title: "Connection test successful",
-								message:
-									"IMAP authentication passed and the account changes have been saved. SMTP is not configured, so this account cannot send email.",
-							}
-						: status === "connection_imap_only"
-							? {
-									title: "Connection test successful",
-									message:
-										"IMAP authentication passed. SMTP is not configured, so this account cannot send email.",
-								}
-							: status === "connection_ok"
-								? {
-										title: "Connection test successful",
-										message: "IMAP and SMTP authentication both passed.",
-									}
-								: undefined;
+					: undefined;
 	const notice =
-		status === "added"
-			? '<div class="notice success" role="status">Account added.</div>'
-			: status === "added_untested"
-				? '<div class="notice success" role="status">Account saved without a successful connection test.</div>'
-				: status === "updated_untested"
-					? '<div class="notice success" role="status">Account changes saved without a successful connection test.</div>'
-					: status === "outlook_connected"
-						? '<div class="notice success" role="status">Outlook account connected.</div>'
-						: status === "updated"
-							? '<div class="notice success" role="status">Account settings updated.</div>'
-							: status === "removed"
-								? '<div class="notice success" role="status">Account removed.</div>'
-								: error
-									? `<div class="notice error" role="alert">${escapeHtml(error)}</div>`
-									: "";
+		status === "added_untested"
+			? '<div class="notice success" role="status">Account saved without a successful connection test.</div>'
+			: status === "updated_untested"
+				? '<div class="notice success" role="status">Account changes saved without a successful connection test.</div>'
+				: status === "updated"
+					? '<div class="notice success" role="status">Account settings updated.</div>'
+					: status === "removed"
+						? '<div class="notice success" role="status">Account removed.</div>'
+						: error
+							? `<div class="notice error" role="alert">${escapeHtml(error)}</div>`
+							: "";
 	const rows = accounts.length
 		? accounts
 				.map(
@@ -579,12 +356,7 @@ function managementPage(
 							<dl class="account-settings">
 								<div><dt>IMAP</dt><dd>${escapeHtml(account.imap.host)}:${account.imap.port}</dd></div>
 								<div><dt>IMAP security</dt><dd>${account.imap.secure ? "Implicit TLS" : "STARTTLS"}</dd></div>
-								<div><dt>SMTP</dt><dd>${account.smtp ? `${escapeHtml(account.smtp.host)}:${account.smtp.port}` : "Not configured"}</dd></div>
-								${account.smtp ? `<div><dt>SMTP security</dt><dd>${account.smtp.secure ? "Implicit TLS" : "STARTTLS"}</dd></div>` : ""}
-								<div><dt>Can send</dt><dd>${account.smtp ? "Yes" : "No"}</dd></div>
-								<div><dt>Authentication</dt><dd>${account.auth.type === "oauth2" ? "OAuth 2.0" : "Password"}</dd></div>
-								<div><dt>Default From</dt><dd>${escapeHtml(account.defaultFrom ?? account.email)}</dd></div>
-								<div><dt>Aliases</dt><dd>${escapeHtml(account.aliases?.join(", ") || "None configured")}</dd></div>
+								<div><dt>Access</dt><dd>Read-only</dd></div>
 							</dl>
 						</details>
 					</li>`,
@@ -593,7 +365,6 @@ function managementPage(
 		: '<li class="empty">No email accounts configured.</li>';
 	const editor = accountEditor(
 		editAccount,
-		outlookOAuthConfigured,
 		accountTestFailure?.change,
 		accountTestFailure?.pending,
 	);
@@ -630,7 +401,7 @@ function managementPage(
 			<meta charset="utf-8">
 			<meta name="viewport" content="width=device-width, initial-scale=1">
 			<meta name="referrer" content="no-referrer">
-			<title>Email account management</title>
+			<title>QQ Mail read-only account management</title>
 			<style>
 				:root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #172033; background: #f5f7fb; }
 				* { box-sizing: border-box; }
@@ -669,14 +440,11 @@ function managementPage(
 				.empty { color: #747d8f; padding-top: .5rem; }
 				fieldset { border: 0; margin: 1.25rem 0 0; padding: 0; }
 				legend { font-weight: 700; margin-bottom: .75rem; }
-				.fieldset-heading { display: flex; width: 100%; gap: 1rem; align-items: center; justify-content: space-between; }
-				.smtp-toggle { display: flex; gap: .45rem; align-items: center; color: #5d6678; font-size: .83rem; font-weight: 700; }
 				.fields { display: grid; grid-template-columns: 1fr 1fr; gap: .9rem; }
 				.server-fields { grid-template-columns: minmax(0, 2fr) minmax(6.5rem, 1fr) auto; align-items: end; }
 				.account-detail-fields > .fields:first-child { margin-top: 1.25rem; }
-				#manual-account-fields > .fields:first-child { margin-top: .9rem; }
 				.provider-picker { margin-top: 1.25rem; }
-				.provider-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .65rem; }
+				.provider-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .65rem; }
 				.provider-option { display: grid; min-height: 4.25rem; padding: .75rem .5rem; place-items: center; border: 1px solid #bdc4d0; color: #384256; background: #fff; }
 				.provider-option:hover { border-color: #3976d7; color: #245fc2; background: #f7faff; }
 				.provider-option[aria-pressed="true"] { border-color: #245fc2; outline: 3px solid #c9dcff; color: #245fc2; background: #edf3ff; }
@@ -721,12 +489,12 @@ function managementPage(
 				.plain-button:hover { color: #172033; background: #eef1f6; }
 				[hidden] { display: none !important; }
 				@media (max-width: 760px) { main { margin: 1.5rem auto; } .fields, .account-settings { grid-template-columns: 1fr; } .full { grid-column: auto; } }
-				@media (max-width: 560px) { .page-header, .account-header { align-items: stretch; flex-direction: column; } .primary-action { width: 100%; } .account-actions { display: grid; grid-template-columns: 1fr 1fr; } .account-actions > :last-child { grid-column: 1 / -1; } .account-actions button, .account-actions a { justify-content: center; width: 100%; } .account-settings div { grid-template-columns: 1fr; gap: .1rem; } .provider-options { grid-template-columns: 1fr 1fr; } }
+				@media (max-width: 560px) { .page-header, .account-header { align-items: stretch; flex-direction: column; } .primary-action { width: 100%; } .account-actions { display: grid; grid-template-columns: 1fr 1fr; } .account-actions > :last-child { grid-column: 1 / -1; } .account-actions button, .account-actions a { justify-content: center; width: 100%; } .account-settings div { grid-template-columns: 1fr; gap: .1rem; } .provider-options { grid-template-columns: 1fr; } }
 			</style>
 		</head>
 		<body>
 			<main>
-				<header class="page-header"><div><h1>Email accounts</h1><p>Manage the mailboxes available to your MCP server.</p></div><button class="primary-action" id="add-account-button" type="button">＋ Add account</button></header>
+				<header class="page-header"><div><h1>Email accounts</h1><p>Manage the mailboxes available to your read-only MCP server.</p></div><button class="primary-action" id="add-account-button" type="button">＋ Add account</button></header>
 				${notice}
 				<section class="card" aria-labelledby="configured-heading">
 					<div class="section-heading"><h2 id="configured-heading">Configured accounts</h2><span class="count" aria-label="${accounts.length} configured accounts">${accounts.length}</span></div>
@@ -746,7 +514,6 @@ function managementPage(
 
 function accountEditor(
 	account?: MailAccount,
-	outlookOAuthConfigured = false,
 	pendingChange?: PendingAccountChange,
 	pendingToken?: string,
 ): { html: string; script: string } {
@@ -765,9 +532,7 @@ function accountEditor(
 				editing
 					? ""
 					: `<fieldset class="provider-picker"><legend>Provider</legend><div class="provider-options" role="group" aria-label="Email provider">
-				<button class="provider-option" type="button" data-provider="gmail" aria-pressed="false">Gmail</button>
-				<button class="provider-option" type="button" data-provider="icloud" aria-pressed="false">iCloud</button>
-				<button class="provider-option" type="button" data-provider="outlook" aria-pressed="false">Outlook</button>
+				<button class="provider-option" type="button" data-provider="qqmail" aria-pressed="false">QQ Mail</button>
 				<button class="provider-option" type="button" data-provider="custom" aria-pressed="false">Custom</button>
 			</div></fieldset>`
 			}
@@ -775,44 +540,26 @@ function accountEditor(
 			<div class="fields">
 				<label class="full">Display name<input name="name" value="${escapeHtml(formAccount?.name ?? "")}" required maxlength="100" autocomplete="off"></label>
 			</div>
-			<div id="manual-account-fields">
 			<div class="fields">
 				<label class="full">Login email address<input name="email" type="email" value="${escapeHtml(formAccount?.email ?? "")}" required maxlength="320" autocomplete="username"></label>
 			</div>
-			<fieldset><legend>Sender addresses</legend><div class="fields">
-				<label class="full">Email aliases<input name="aliases" value="${escapeHtml(formAccount?.aliases?.join(", ") ?? "")}" placeholder="alias@icloud.com, alias@outlook.com" autocomplete="off"></label>
-				<label class="full">Default From address<input name="defaultFrom" type="email" value="${escapeHtml(formAccount?.defaultFrom ?? "")}" placeholder="Defaults to login email address" maxlength="320" autocomplete="off"></label>
-			</div><p class="help">Enter aliases for this mailbox separated by commas. The default From must be the login email or one of these aliases. Only add addresses your provider already allows this account to send from. These settings apply to new drafts and replies; existing drafts keep their saved sender.</p></fieldset>
 			<fieldset><legend>Incoming mail (IMAP)</legend><div class="fields server-fields">
 				<label>Host<input name="imapHost" id="imap-host" value="${escapeHtml(formAccount?.imap.host ?? "")}" required></label>
 				<label>Port<input name="imapPort" id="imap-port" type="number" min="1" max="65535" value="${formAccount?.imap.port ?? ""}" placeholder="993" required></label>
 				<label class="check" title="Use implicit TLS"><input name="imapSecure" id="imap-secure" type="checkbox"${formAccount?.imap.secure === false ? "" : " checked"}> TLS</label>
 			</div></fieldset>
-			<fieldset><legend class="fieldset-heading"><span>Outgoing mail (SMTP)</span><label class="smtp-toggle"><input name="smtpEnabled" id="smtp-enabled" type="checkbox"${formAccount?.smtp ? " checked" : ""}> Enable SMTP</label></legend><div class="fields server-fields" id="smtp-fields"${formAccount?.smtp ? "" : " hidden"}>
-				<label>Host<input name="smtpHost" id="smtp-host" value="${escapeHtml(formAccount?.smtp?.host ?? "")}" required></label>
-				<label>Port<input name="smtpPort" id="smtp-port" type="number" min="1" max="65535" value="${formAccount?.smtp?.port ?? ""}" placeholder="587" required></label>
-				<label class="check" title="Use implicit TLS"><input name="smtpSecure" id="smtp-secure" type="checkbox"${formAccount?.smtp?.secure === false ? "" : " checked"}> TLS</label>
-			</div></fieldset>
 			${
 				editing
 					? ""
 					: `<fieldset><legend>Authentication</legend><div class="fields">
-				<label class="full" id="auth-type-field">Type<select name="authType" id="auth-type"><option value="password">App password</option><option value="oauth2">OAuth 2.0 tokens</option></select></label>
-				<label class="full" id="password-field">App password<input name="password" id="password" type="password" autocomplete="new-password"></label>
-				<div class="fields full" id="oauth-fields" hidden>
-					<label class="full">Access token<input name="accessToken" id="access-token" type="password" autocomplete="off"></label>
-					<label class="full">Refresh token<input name="refreshToken" type="password" autocomplete="off"></label>
-					<label>Client ID<input name="oauthClientId" autocomplete="off"></label>
-					<label>Tenant<input name="oauthTenant" value="consumers" autocomplete="off"></label>
-				</div>
+				<label class="full" id="password-field">IMAP authorization code<input name="password" id="password" type="password" autocomplete="new-password" required></label>
 			</div></fieldset>`
 			}
-			</div>
 			<div class="form-actions">
 				<button class="submit" id="account-submit" type="submit">${existingAccount ? "Save changes" : "Test and save account"}</button>
 				${editing ? '<a class="cancel-link" href="/">Cancel</a>' : '<button class="secondary" type="button" data-dialog-close>Cancel</button>'}
 			</div>
-			<p class="help" id="account-help">${pendingChange ? "Change the connection details and test again. The stored pending credential is never returned to the page." : editing ? "Changing the login email changes the IMAP and SMTP username. Use Default From to change your sender instead. Connection changes are tested before saving; sender-only changes keep your credentials and need no connection test." : "Use an app-specific password for Gmail or iCloud. Passwords and tokens are never displayed after saving."}</p>
+			<p class="help" id="account-help">${pendingChange ? "Change the connection details and test again. The stored pending credential is never returned to the page." : editing ? "Connection changes are tested before saving. The stored authorization code is never shown; enter a new one only when rotating it." : "Generate the IMAP authorization code in QQ Mail settings (账户 → POP3/IMAP/SMTP 服务). The code is never displayed after saving."}</p>
 			</div>
 		</form>
 	</section>
@@ -821,53 +568,17 @@ function accountEditor(
 	const providerScript = editing
 		? ""
 		: `
-			const outlookOAuthConfigured = ${outlookOAuthConfigured};
 			const presets = {
-				gmail: { imapHost: "imap.gmail.com", imapPort: "993", smtpHost: "smtp.gmail.com", smtpPort: "465", smtpSecure: true, smtpEnabled: true, auth: "password" },
-				icloud: { imapHost: "imap.mail.me.com", imapPort: "993", smtpHost: "smtp.mail.me.com", smtpPort: "587", smtpSecure: false, smtpEnabled: true, auth: "password" },
-				outlook: { imapHost: "outlook.office365.com", imapPort: "993", smtpHost: "smtp.office365.com", smtpPort: "587", smtpSecure: false, smtpEnabled: true, auth: "oauth2" }
+				qqmail: { imapHost: "imap.qq.com", imapPort: "993" },
 			};
 			const byId = (id) => document.getElementById(id);
-			function updateAuth() {
-				const oauth = byId("auth-type").value === "oauth2";
-				byId("password-field").hidden = oauth;
-				byId("oauth-fields").hidden = !oauth;
-				byId("password").required = !oauth;
-				byId("access-token").required = oauth;
-			}
 			function updateProvider(provider) {
-				const outlook = provider === "outlook";
-				const form = byId("account-form");
 				byId("account-detail-fields").hidden = false;
-				const manualFields = byId("manual-account-fields");
-				const submit = byId("account-submit");
-				manualFields.hidden = outlook;
-				form.action = outlook ? "/oauth/outlook/start" : "/accounts";
-				submit.textContent = outlook ? "Continue with Microsoft" : "Test and save account";
-				submit.disabled = outlook && !outlookOAuthConfigured;
-				byId("account-help").textContent = outlook
-					? outlookOAuthConfigured
-						? "Sign in with Microsoft to authorize IMAP and SMTP access. Tokens are stored encrypted and are not shown in the browser."
-						: "Set OUTLOOK_CLIENT_ID and OUTLOOK_CLIENT_SECRET to enable Microsoft sign-in."
-					: "Use an app-specific password for Gmail or iCloud. Passwords and tokens are never displayed after saving.";
 				const preset = presets[provider];
-				byId("auth-type-field").hidden = Boolean(preset);
 				if (preset) {
 					byId("imap-host").value = preset.imapHost; byId("imap-port").value = preset.imapPort;
-					byId("smtp-host").value = preset.smtpHost; byId("smtp-port").value = preset.smtpPort;
-					byId("imap-secure").checked = true; byId("smtp-secure").checked = preset.smtpSecure;
-					byId("smtp-enabled").checked = preset.smtpEnabled;
-					byId("auth-type").value = preset.auth;
-				} else {
-					byId("imap-host").value = ""; byId("imap-port").value = "";
-					byId("smtp-host").value = ""; byId("smtp-port").value = "";
-					byId("imap-secure").checked = true; byId("smtp-secure").checked = false;
-					byId("smtp-enabled").checked = false;
-					byId("auth-type").value = "password";
+					byId("imap-secure").checked = true;
 				}
-				manualFields.querySelectorAll("input, select, button").forEach((control) => control.disabled = outlook);
-				if (!outlook) updateSmtp();
-				updateAuth();
 			}
 			document.querySelectorAll("[data-provider]").forEach((button) => {
 				button.addEventListener("click", () => {
@@ -875,19 +586,10 @@ function accountEditor(
 					updateProvider(button.dataset.provider);
 				});
 			});
-			byId("auth-type").addEventListener("change", updateAuth);
 			`;
 	const script = `<script>
 		const accountDialog = document.getElementById("account-editor");
 		const addAccountButton = document.getElementById("add-account-button");
-		const smtpEnabled = document.getElementById("smtp-enabled");
-		const smtpFields = document.getElementById("smtp-fields");
-		function updateSmtp() {
-			smtpFields.hidden = !smtpEnabled.checked;
-			smtpFields.querySelectorAll("input").forEach((input) => input.disabled = !smtpEnabled.checked);
-		}
-		smtpEnabled.addEventListener("change", updateSmtp);
-		updateSmtp();
 		const closeAccountDialog = () => ${editing ? 'window.location.assign("/")' : "accountDialog.close()"};
 		addAccountButton.addEventListener("click", () => {
 			if (!accountDialog.open) accountDialog.showModal();
@@ -904,47 +606,8 @@ function accountEditor(
 	return { html, script };
 }
 
-function outlookConfigured(env: MailEnv): boolean {
-	return Boolean(env.OUTLOOK_CLIENT_ID && env.OUTLOOK_CLIENT_SECRET);
-}
-
-function outlookConfig(env: MailEnv): {
-	clientId: string;
-	clientSecret: string;
-	tenant: string;
-} {
-	if (!env.OUTLOOK_CLIENT_ID || !env.OUTLOOK_CLIENT_SECRET)
-		throw new Error("Outlook OAuth is not configured");
-	if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(env.OUTLOOK_CLIENT_ID))
-		throw new Error("OUTLOOK_CLIENT_ID must be a Microsoft Entra application client ID");
-	const tenant = env.OUTLOOK_TENANT || "consumers";
-	if (
-		!/^(?:common|organizations|consumers|[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$/i.test(
-			tenant,
-		)
-	)
-		throw new Error("OUTLOOK_TENANT must be common, organizations, consumers, or a tenant ID");
-	return {
-		clientId: env.OUTLOOK_CLIENT_ID,
-		clientSecret: env.OUTLOOK_CLIENT_SECRET,
-		tenant,
-	};
-}
-
-function outlookRedirectUri(request: Request): string {
-	return `${new URL(request.url).origin}/oauth/outlook/callback`;
-}
-
-function oauthCookie(value: string, secure: boolean): string {
-	return `outlook_oauth=${value}; Path=/oauth/outlook/callback; HttpOnly; SameSite=Lax; Max-Age=600${secure ? "; Secure" : ""}`;
-}
-
-function clearOauthCookie(secure: boolean): string {
-	return `outlook_oauth=; Path=/oauth/outlook/callback; HttpOnly; SameSite=Lax; Max-Age=0${secure ? "; Secure" : ""}`;
-}
-
-function connectionTestCookie(secure: boolean, smtpConfigured: boolean): string {
-	return `connection_test=${smtpConfigured ? "connection_ok" : "connection_imap_only"}; Path=/; HttpOnly; SameSite=Strict; Max-Age=60${secure ? "; Secure" : ""}`;
+function connectionTestCookie(secure: boolean): string {
+	return `connection_test=connection_ok; Path=/; HttpOnly; SameSite=Strict; Max-Age=60${secure ? "; Secure" : ""}`;
 }
 
 function clearConnectionTestCookie(secure: boolean): string {
@@ -960,30 +623,6 @@ function cookieValue(request: Request, name: string): string | undefined {
 	return undefined;
 }
 
-async function verifyMicrosoftIdentity(
-	idToken: string,
-	clientId: string,
-	nonce: string,
-): Promise<{ email: string }> {
-	const unverified = decodeJwt(idToken);
-	if (typeof unverified.tid !== "string" || !/^[0-9a-f-]{36}$/i.test(unverified.tid))
-		throw new Error("Microsoft identity token has no valid tenant");
-	const issuer = `https://login.microsoftonline.com/${unverified.tid}/v2.0`;
-	const { payload } = await jwtVerify(idToken, microsoftJwks, {
-		issuer,
-		audience: clientId,
-	});
-	if (payload.nonce !== nonce) throw new Error("Microsoft identity token nonce is invalid");
-	const email =
-		typeof payload.preferred_username === "string"
-			? payload.preferred_username
-			: typeof payload.email === "string"
-				? payload.email
-				: undefined;
-	if (!email) throw new Error("Microsoft identity did not return an email address");
-	return { email: validEmail(email) };
-}
-
 function isTrustedFormSubmission(request: Request): boolean {
 	if (request.headers.get("Sec-Fetch-Site") === "same-origin") return true;
 	const origin = request.headers.get("Origin");
@@ -997,48 +636,27 @@ function isTrustedFormSubmission(request: Request): boolean {
 	}
 }
 
-function accountInput(form: FormData, existingAuth?: AccountAuth): Omit<MailAccount, "id"> {
-	let auth = existingAuth;
-	if (!auth) {
-		const authType = value(form, "authType");
-		auth =
-			authType === "password"
-				? { type: "password", password: requiredSecret(form, "password") }
-				: authType === "oauth2"
-					? {
-							type: "oauth2",
-							accessToken: requiredSecret(form, "accessToken"),
-							refreshToken: optionalSecret(form, "refreshToken"),
-							clientId: optional(form, "oauthClientId"),
-							tenant: optional(form, "oauthTenant") || "consumers",
-						}
-					: fail("Select a supported authentication type");
-	}
-	const email = validEmail(required(form, "email"));
-	const settings = senderSettings({
-		email,
-		aliases: value(form, "aliases")
-			.split(/[,;\n]+/)
-			.map((alias) => alias.trim())
-			.filter(Boolean),
-		defaultFrom: optional(form, "defaultFrom"),
-	});
+function accountInput(
+	env: MailEnv,
+	form: FormData,
+	existingAuth?: AccountAuth,
+): Omit<MailAccount, "id"> {
+	const auth = existingAuth ?? {
+		type: "password" as const,
+		password: requiredSecret(form, "password"),
+	};
+	const imapHost = validHost(required(form, "imapHost"), "IMAP host");
+	const allowedHosts = allowedImapHosts(env);
+	if (!allowedHosts.includes(imapHost.toLowerCase()))
+		throw new Error(`IMAP host must be one of the allowed hosts: ${allowedHosts.join(", ")}`);
 	return {
 		name: validName(required(form, "name")),
-		email,
-		...settings,
+		email: validEmail(required(form, "email")),
 		imap: {
-			host: validHost(required(form, "imapHost"), "IMAP host"),
+			host: imapHost,
 			port: validPort(required(form, "imapPort"), "IMAP port"),
 			secure: checkbox(form, "imapSecure"),
 		},
-		smtp: checkbox(form, "smtpEnabled")
-			? {
-					host: validHost(required(form, "smtpHost"), "SMTP host"),
-					port: validPort(required(form, "smtpPort"), "SMTP port"),
-					secure: checkbox(form, "smtpSecure"),
-				}
-			: undefined,
 		auth,
 	};
 }
@@ -1054,19 +672,10 @@ function required(form: FormData, name: string): string {
 	return input;
 }
 
-function optional(form: FormData, name: string): string | undefined {
-	return value(form, name) || undefined;
-}
-
 function requiredSecret(form: FormData, name: string): string {
 	const input = form.get(name);
 	if (typeof input !== "string" || !input) throw new Error(`${name} is required`);
 	return input;
-}
-
-function optionalSecret(form: FormData, name: string): string | undefined {
-	const input = form.get(name);
-	return typeof input === "string" && input ? input : undefined;
 }
 
 function checkbox(form: FormData, name: string): boolean {
@@ -1099,10 +708,6 @@ function validHost(input: string, label: string): string {
 	)
 		throw new Error(`${label} is invalid`);
 	return input;
-}
-
-function fail(message: string): never {
-	throw new Error(message);
 }
 
 function errorMessage(error: unknown): string {
