@@ -40,9 +40,9 @@
 	},
 	"dependencies": {
 		"@cloudflare/workers-oauth-provider": "^1.2.3",
-		"agents": "^0.30.1",
-		"hono": "^4.13.14",
-		"mailparser": "^3.12.4",
+		"agents": "^0.33.0",
+		"hono": "^4.13.16",
+		"mailparser": "^3.14.2",
 		"zod": "^4.6.7"
 	},
 	"devDependencies": {
