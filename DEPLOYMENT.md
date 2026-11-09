@@ -54,12 +54,21 @@ unset CREDENTIAL_ENCRYPTION_KEY
 npm run deploy        # wrangler deploy --config wrangler.production.toml
 ```
 
-Nominal endpoints afterwards:
+Nominal endpoints afterwards (this deployment also binds the custom domain
+`qqemail.011203.xyz`; use it everywhere below, keep `workers.dev` as the fallback host):
 
-- MCP: `https://qqmail-readonly-mcp.<your-subdomain>.workers.dev/mcp`
-- Account management UI: `https://qqmail-readonly-mcp.<your-subdomain>.workers.dev/`
+- MCP: `https://qqemail.011203.xyz/mcp` (fallback `https://qqmail-readonly-mcp.011203.workers.dev/mcp`)
+- Account management UI: `https://qqemail.011203.xyz/`
 
-Both keep returning 401/403 until Access is configured.
+The custom domain is configured in `wrangler.production.toml`:
+
+```toml
+routes = [
+  { pattern = "qqemail.011203.xyz", custom_domain = true },
+]
+```
+
+Both hostnames keep returning 401/403 until Access is configured.
 
 ## 5. Cloudflare Access + Managed OAuth
 
@@ -68,7 +77,8 @@ write access they can also be scripted (see the repo's deploy notes / Cloudflare
 
 1. In **Zero Trust → Access controls → Applications**, add an application →
    **Self-hosted and private**.
-2. Application domain: the Worker hostname above (`qqmail-readonly-mcp.<subdomain>.workers.dev`).
+2. Application domain: add **both** hostnames — `qqemail.011203.xyz` (primary, used by
+   ChatGPT and the management UI) and `qqmail-readonly-mcp.011203.workers.dev` (fallback).
 3. Policy: **Allow** restricted to your own email address (or an identity group that
    contains only you). One deployment shares one encrypted account store — do not
    authorize other people.
@@ -91,7 +101,7 @@ write access they can also be scripted (see the repo's deploy notes / Cloudflare
 Verify enforcement:
 
 ```bash
-curl -i https://qqmail-readonly-mcp.<subdomain>.workers.dev/mcp
+curl -i https://qqemail.011203.xyz/mcp
 # expect 401 from the Access layer (with OAuth discovery headers once Managed OAuth is on)
 ```
 

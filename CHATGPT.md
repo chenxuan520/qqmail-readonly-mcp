@@ -13,7 +13,7 @@ the management UI).
 | -------------- | --------------------------------------------------------- |
 | Plugin name    | `QQ Mail`                                                 |
 | Connection     | Server URL (public HTTPS endpoint)                        |
-| MCP server URL | `https://qqmail-readonly-mcp.<subdomain>.workers.dev/mcp` |
+| MCP server URL | `https://qqemail.011203.xyz/mcp` |
 | Authentication | **OAuth**                                                 |
 
 ## Steps
