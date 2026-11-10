@@ -40,6 +40,8 @@
 	},
 	"dependencies": {
 		"@cloudflare/workers-oauth-provider": "^1.2.4",
+		"@modelcontextprotocol/sdk": "1.32.2",
+		"@modelcontextprotocol/server": "2.4.0",
 		"agents": "^0.33.0",
 		"hono": "^4.13.17",
 		"mailparser": "^3.14.2",

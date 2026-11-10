@@ -13,7 +13,9 @@ jobs:
             github.event.pull_request.head.repo.full_name == github.repository &&
             github.event.pull_request.base.ref == 'main'
         runs-on: ubuntu-latest
+        timeout-minutes: 15
         permissions:
+            actions: read
             contents: write
             pull-requests: write
         steps:
@@ -23,6 +25,29 @@ jobs:
               uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98
               with:
                   github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+            - name: Wait for successful CI on this PR head
+              if: >-
+                  steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
+                  steps.metadata.outputs.update-type == 'version-update:semver-patch'
+              env:
+                  GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+                  HEAD_SHA: "${{ github.event.pull_request.head.sha }}"
+              run: |
+                  for attempt in {1..60}; do
+                      result=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=pull_request&head_sha=$HEAD_SHA" \
+                          --jq '[.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .name == "CI")] | max_by(.id) | if . == null then "pending" elif .status == "completed" then .conclusion else .status end')
+                      case "$result" in
+                          success) exit 0 ;;
+                          failure|cancelled|timed_out|action_required|neutral|skipped|stale|startup_failure)
+                              echo "CI did not succeed for $HEAD_SHA: $result"
+                              exit 1
+                              ;;
+                      esac
+                      sleep 10
+                  done
+                  echo "Timed out waiting for CI on $HEAD_SHA"
+                  exit 1
 
             - name: Enable squash auto-merge for routine updates
               if: >-
