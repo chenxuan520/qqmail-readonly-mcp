@@ -14,6 +14,14 @@ The owner-password account management UI lives in `src/app.ts`; owner login/sess
 rate limiting in `src/owner-auth.ts`; the OAuth 2.1 consent flow in `src/oauth-flow.ts`
 (authorization server itself is `@cloudflare/workers-oauth-provider`).
 
+## Deployment rule
+
+The user requires all Worker releases to use the project's Wrangler CLI. Never publish
+Worker code through direct Cloudflare REST API calls, MCP code uploads, or other upload
+shortcuts. Use the existing production configuration and preserve its secrets, variables,
+KV namespaces, and Durable Object namespace. Do not reset passwords, rotate encryption
+keys, recreate resources, or clear stored accounts or OAuth grants during an upgrade.
+
 ## The read-only invariant (do not break)
 
 This server must never modify a mailbox:
